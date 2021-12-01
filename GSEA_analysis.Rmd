@@ -1,0 +1,2566 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+#tutorial
+{
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute
+code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by 
+placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by 
+pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be 
+saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to 
+preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. 
+Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, 
+the output of the chunk when it was last run in the editor is displayed.
+}
+
+
+
+#loading libraries, setting up workspace and directories
+```{r}
+
+#loading libraries and defining settings
+{
+  #analysis libraries
+  library(DESeq2)
+  #library(Rtsne)
+  #library(umap)
+  #library(biomaRt)
+  #library(fgsea)
+  library(pathview)
+  library(KEGGREST)
+  library(gage)
+  library(clusterProfiler)
+  
+  #for parallelisation
+  #library(BiocParallel)
+  library(foreach)
+  #library(doMC)
+  
+  #graphics libraries
+  #library(PCAtools)
+  #library(ggplot2)
+  #library(ggpmisc)
+  #library(reshape2)
+  #library(ggrepel)
+  #library(patchwork)
+  #library(cowplot)
+  #library(scales)
+  #library(data.tree)
+  #library(plotly)
+  #library(viridis)
+  #library(ggnewscale)
+  #library(grid)
+  
+  #other libraries
+  library(stringr)
+  
+  #setting up parallelisation parameters for BiocParallel
+  # numCores <- parallel::detectCores()
+  # #utilise ~3/4 of the available cores/threads
+  # register(MulticoreParam(ceiling(numCores*(3/4))))
+  # registerDoMC(ceiling(numCores*(3/4)))
+  
+  
+}
+
+#setting up directories
+{
+  rm(list = ls(all.names = T))
+  orig_loc <- getwd()
+  
+  setwd("/home/tareens/Workspace/Tregs/")
+  #wrkspc <- "/home/tareens/Workspace/Tregs/"
+  
+  #locations of inputs
+  loc_counts <- paste0(getwd(), "/05_counts/")
+  loc_diffexprs_sngltrnscrpt <- paste0(getwd(), "/08_single_transcript/", 
+                                       "Differential Expression Results/")
+  loc_gsea_gmt <- paste0(getwd(), "/09_GSEA/GMTs/")
+  
+  #locations of outputs
+  loc_diffexprs <- paste0(getwd(), "/06_differential_expression/")
+  loc_diffexprs_merged <- paste0(getwd(), 
+                                 "/06b_differential_expression_merged/")
+  loc_plots <- paste0(getwd(), "/06b_differential_expression_merged/",
+                      "Plots/")
+  loc_tissue_specific_exprs <- paste0(getwd(), "/08_single_transcript/", 
+                                      "Tissue Specific Expression/")
+  loc_gsea <- paste0(getwd(), "/09_GSEA/")
+  loc_gsea_results <- paste0(getwd(), "/09_GSEA/GSEA Results/")
+  loc_pathview_results <- paste0(getwd(), "/09_GSEA/PathView Results/")
+  
+  #location of functions and scripts
+  loc_scripts <- paste0(getwd(), "/00b_R/")
+  
+  # #location of FANTOM5 data
+  # loc_FANTOM <- paste0(getwd(), "/00d_other_data/" , "E-MTAB-3579 - ", 
+  #                      "RNA-Seq CAGE (Cap Analysis of Gene Expression) ", 
+  #                      "analysis of mice tissue in RIKEN FANTOM5 project/")
+  
+  #loading saved environment
+  #load("/home/tareens/Workspace/Tregs/.RData")
+  
+}
+
+#sourcing functions and scripts
+{
+  #sourcing the unified differential expression function
+  source(paste0(loc_scripts, "DiffExprsDESeqAll.R"))
+  
+  #sourcing multiplot function
+  source(paste0(loc_scripts, "multiplot.r"))
+  
+  #sourcing the plotting functions of ggbiplot as the library is no longer 
+  #compatible with R 3.5.2+
+  source(paste0(loc_scripts, "ggbiplot.r"))
+  source(paste0(loc_scripts, "ggscreeplot.r"))
+  
+}
+
+```
+
+
+#GSEA analysis using GAGE and PathView
+```{r}
+
+#reading in DESeq2 outputs
+{
+  #read normalised counts from the '#writing out the differential expression 
+  # files' code block to get them filtered by min transcripts per cell
+  #reading norm counts
+  norm_counts <- read.delim(file = paste0(loc_counts, "normalised_counts.txt"),
+                            sep = "\t",
+                            stringsAsFactors = F)
+  #norm_counts <- norm_counts[rowSums(as.matrix(norm_counts))>0,]
+  
+  #reading the DESeq2 analysis output table
+  merged_results_list <- readRDS(file = paste0(loc_diffexprs, 
+                                        "merged_results_list.rds"))
+  
+  contrast_groups <- list(c("Blood"), 
+                          c("Spleen", "Lymph Node", "Peyer's Patches"), 
+                          c("Intraepithelial Layer", 
+                            "Lamina Propria Lymphocyte"), 
+                          c("Kidney", "Lung", "Liver", "Pancreas"),
+                          c("cellTypeT"),
+                          c("cellTypeNT"))
+  
+  #ensuring that names in contrast_groups list are all lower letter and do not 
+  # contain spaces or punctuation
+  for(i in seq(1, length(contrast_groups)))
+  {
+    contrast_groups[[i]] <- tolower(unique(
+      gsub("_.*|[[:space:]]|[[:punct:]]", "", contrast_groups[[i]])
+      ))
+  }
+  rm(i)
+  names(contrast_groups) <- c("Blood", 
+                              "Lymphoid", 
+                              "Gut-Associated", 
+                              "Non-Lymphoid", 
+                              "Treg", 
+                              "Tconv")
+  
+  # # output_table <- read.delim(file = paste0(loc_diffexprs_merged,
+  # #                                          "output_table_combined.txt"),
+  # #                            sep = "\t", stringsAsFactors = F)
+  # output_table <- read.delim(file = paste0(loc_diffexprs_merged,
+  #                                          "output_table.txt"),
+  #                            sep = "\t", stringsAsFactors = F)
+  # 
+  # colnames(output_table) <- output_table[3,]
+  # output_table <- output_table[-(1:3),]
+  # 
+  # mean_norm_counts <- output_table[, c(1, 44:63)]
+  # rownames(mean_norm_counts) <- mean_norm_counts$`Gene stable ID`
+  # mean_norm_counts$`Gene stable ID` <- NULL
+  # # rownames(mean_norm_counts) <- gsub(pattern = "\\.[0-9]+$",
+  # #                                    replacement = "",
+  # #                                    x = rownames(mean_norm_counts),
+  # #                                    ignore.case = T)
+  # #mean_norm_counts$`Gene stable ID` <- output_table$`Gene stable ID`
+  # #colnames(temp) <- temp[3,]
+  # #temp <- temp[4:nrow(temp),]
+  
+}
+
+#running gage analysis
+{
+  
+  #generating a mapping from ensembl to entrez/ncbi (because gage only uses 
+  # entrez/ncbi)
+  {
+    #mapping entrez ids to norm_counts
+    norm_counts_ncbi <- norm_counts
+    norm_counts_ncbi$ENSEMBL <- gsub(pattern = "\\.[0-9]+$", 
+                                       replacement = "", 
+                                       x = rownames(norm_counts_ncbi), 
+                                       ignore.case = T)
+    
+    id_mapping <- data.frame(ensembl = rownames(norm_counts))
+    id_mapping$ensembl <- gsub(pattern = "\\.[0-9]+$", 
+                               replacement = "", 
+                               x = id_mapping$ensembl, 
+                               ignore.case = T)
+    id_mapping <- as.data.frame(id2eg(ids = id_mapping$ensembl, 
+                                      category = "ENSEMBL", 
+                                      org = "mouse", 
+                                      na.rm = F))
+    id_mapping$ENTREZID[id_mapping$ENTREZID == "NA"] <- NA
+    
+    norm_counts_ncbi <- merge(x = norm_counts_ncbi, 
+                              y = id_mapping, 
+                              by = "ENSEMBL", 
+                              all = T)
+    
+    norm_counts_ncbi <- norm_counts_ncbi[!is.na(norm_counts_ncbi$ENTREZID),]
+    duplicated_entries <- gsub(pattern = ";.*$", 
+                               replacement = "", 
+                               x = norm_counts_ncbi$ENTREZID, 
+                               ignore.case = T)
+    
+    #formatting unique ncbi ids
+    while(T){
+      #flag = 0
+      if(any(duplicated(duplicated_entries, incomparables = NA))){
+        duplicated_indices <- which(duplicated(duplicated_entries))
+        
+        for(index in duplicated_indices){
+          ids <- str_split(string = norm_counts_ncbi$ENTREZID[index], 
+                           pattern = "; *", simplify = T)
+          
+          ids <- ids[!(ids %in% duplicated_entries)]
+          
+          if(length(ids) > 0){
+            duplicated_entries[index] <- ids[1] 
+          }
+          else{
+            duplicated_entries[index] <- NA
+          }
+        }
+      }
+      else break
+    }
+    
+    #now no longer duplicated
+    norm_counts_ncbi$ENTREZID <- duplicated_entries
+    
+    norm_counts_ncbi <- norm_counts_ncbi[complete.cases(norm_counts_ncbi),]
+    
+    rownames(norm_counts_ncbi) <- gsub(pattern = ";.*$", 
+                                       replacement = "", 
+                                       x = norm_counts_ncbi$ENTREZID, 
+                                       ignore.case = T)
+    
+    id_mapping_final <- data.frame(ENSEMBL = norm_counts_ncbi$ENSEMBL, 
+                                   ENTREZID = norm_counts_ncbi$ENTREZID)
+    
+    norm_counts_ncbi$ENSEMBL <- NULL
+    norm_counts_ncbi$ENTREZID <- NULL
+    
+    rm(duplicated_entries, duplicated_indices, ids, index)
+    
+  }
+  #formatting column headers
+  {
+    colnames(norm_counts_ncbi) <- gsub(pattern = "_NT_", 
+                                       replacement = "_Tconv_", 
+                                       x = gsub(pattern = "_T_", 
+                                                replacement = "_Treg_", 
+                                                x = colnames(norm_counts_ncbi), 
+                                                ignore.case = T), 
+                                       ignore.case = T)
+    
+    colnames(norm_counts_ncbi) <- gsub(pattern = "IntraEpithelialLayer", 
+                                       replacement = "IEL", 
+                                       x = colnames(norm_counts_ncbi), 
+                                       ignore.case = T)
+    colnames(norm_counts_ncbi) <- gsub(pattern = "LaminaPropriaLymphocyte", 
+                                       replacement = "LPL", 
+                                       x = colnames(norm_counts_ncbi), 
+                                       ignore.case = T)
+    colnames(norm_counts_ncbi) <- gsub(pattern = "LymphNode", 
+                                       replacement = "LN", 
+                                       x = colnames(norm_counts_ncbi), 
+                                       ignore.case = T)
+    colnames(norm_counts_ncbi) <- gsub(pattern = "PeyersPatches", 
+                                       replacement = "PP", 
+                                       x = colnames(norm_counts_ncbi), 
+                                       ignore.case = T)
+    # colnames(norm_counts_ncbi) <- gsub(pattern = "_",
+    #                                    replacement = " ",
+    #                                    x = colnames(norm_counts_ncbi),
+    #                                    ignore.case = T)
+  }
+  
+  #converting to log2 data
+  {
+    norm_counts_ncbi <- data.matrix(log2(norm_counts_ncbi))
+    
+    norm_counts_ncbi[!is.finite(norm_counts_ncbi)] <- NA
+    
+    norm_counts_ncbi <- as.data.frame(norm_counts_ncbi)
+  }
+  
+  
+  #loading/downloading kegg genesets
+  # kegg_genesets <- kegg.gsets(species = "mouse",
+  #                             id.type = "entrez",
+  #                             check.new = T)
+  # kegg_genesets <- kegg.gsets(species = "human",
+  #                             id.type = "entrez",
+  #                             check.new = T)
+  kegg_genesets <- readRDS(file = paste0(loc_pathview_results,
+                                         "kegg_genesets.rds"))
+  
+  #removing mmu05206 as it produces the "Error in img[pidx[i, 3]:pidx[i, 4], 
+  # sel.px, 1:3] : only 0's may be mixed with negative subscripts" error in
+  # pathview()
+  kegg_genesets$kg.sets <- 
+    kegg_genesets$kg.sets[-grep(pattern = "mmu05206", 
+                                x = names(kegg_genesets$kg.sets), 
+                                ignore.case = T)]
+  
+  #formatting column indices for comparison in groups
+  indices <- list(grep(pattern = "Blood_Treg", 
+                       x = colnames(norm_counts_ncbi), 
+                       ignore.case = T), 
+                  grep(pattern = "(Spleen|LN|PP)_Treg", 
+                       x = colnames(norm_counts_ncbi), 
+                       ignore.case = T), 
+                  grep(pattern = "(IEL|LPL)_Treg", 
+                       x = colnames(norm_counts_ncbi), 
+                       ignore.case = T), 
+                  grep(pattern = "(Kidney|Liver|Lung|Pancreas)_Treg", 
+                       x = colnames(norm_counts_ncbi), 
+                       ignore.case = T))
+  names(indices) <- c("Blood", "Lymphoid", "Gut-associated", "Non-lymphoid")
+  
+  #gage analysis
+  gage_results <- list()
+  for(i in seq(1, length(indices)-1)){
+    
+    #gage_results[[length(gage_results)+1]] <- list()
+    gage_results[[i]] <- list()
+    names(gage_results)[i] <- names(indices)[i]
+    for(j in seq(i+1, length(indices))){
+      
+      gage_results[[i]][[length(gage_results[[i]])+1]] <- 
+        gage(exprs = norm_counts_ncbi, 
+             #exprs = data.matrix(gse16873), 
+             gsets = kegg_genesets$kg.sets, 
+             #gsets = kegg.gs, 
+             ref = indices[[i]], 
+             samp = indices[[j]], 
+             same.dir = F, 
+             compare = "as.group", 
+             set.size = c(15, 1000)
+             )
+      
+      names(gage_results[[i]])[length(gage_results[[i]])] <- names(indices)[j]
+    }
+  }
+  
+  saveRDS(object = gage_results, file = paste0(loc_pathview_results, 
+                                               "gage_results.rds"))
+  
+  #write out the gage results
+  output_gage <- as.data.frame(gage_results[[1]][[1]]$greater[,c(5, 2:4)])
+  output_gage$Significant <- "FALSE"
+  output_gage$Significant[output_gage$q.val < 0.1] <- "TRUE"
+  header_row <- c("", "Blood vs Lymphoid", "", "", "")
+  for(i in seq(1, length(gage_results))){
+    
+    for(j in seq(ifelse(i == 1, 2, 1), length(gage_results[[i]]))){
+      
+      temp <- as.data.frame(gage_results[[i]][[j]]$greater[,2:4])
+      temp$Significant <- "FALSE"
+      temp$Significant[temp$q.val < 0.1] <- "TRUE"
+      
+      output_gage <- 
+        merge(x = output_gage, y = temp, 
+              by = "row.names", all = T)
+      rownames(output_gage) <- output_gage$Row.names
+      output_gage$Row.names <- NULL
+      header_row <- c(header_row, 
+                      c(paste0(names(gage_results)[i], 
+                               " vs ", 
+                               names(gage_results[[i]])[j]), 
+                        "", "", ""))
+    }
+  }
+  
+  output_gage <- output_gage[complete.cases(output_gage),]
+  output_gage <- output_gage[order(output_gage[,5], decreasing = T),]
+  
+  output_gage <- cbind((str_split(string = rownames(output_gage), 
+                                              pattern = " ", 
+                                              n = 2, 
+                                              simplify = T)),
+                       output_gage)
+  
+  output_gage$`1` <- as.character(output_gage$`1`)
+  output_gage$`2` <- as.character(output_gage$`2`)
+  
+  output_gage <- rbind(c("", "", header_row), 
+                       c("KEGG ID", "Description", 
+                         gsub(pattern = "\\.(x|y)$", 
+                              replacement = "", 
+                              x = colnames(output_gage), 
+                              ignore.case = T)[-c(1,2)]), 
+                       output_gage)
+  
+  write.table(x = output_gage, 
+              file = paste0(loc_pathview_results, 
+                            "output_gage.tab"), 
+              quote = F, 
+              sep = "\t", 
+              row.names = F, 
+              col.names = F)
+  
+  #gage analysis no contrasting
+  #gage_results_no_contrasting <- list()
+  
+  
+}
+
+#visualising gage results
+{
+  #loading differential expression results
+  merged_results_list <- readRDS(file = paste0(loc_diffexprs, 
+                                               "merged_results_list.rds"))
+  
+  #setting up pathview
+  data(gene.idtype.bods)
+  work.dir <- getwd()
+  setwd(loc_pathview_results)
+  #path <- loc_pathview_results
+  diff_exprs_counter = 1
+  for(i in seq(1, length(gage_results))){
+    #path <- paste0(getwd(), "/", names(gage_results)[i], "/")
+    #dir.create(path = path, recursive = T)
+    #setwd(path)
+    for(j in seq(1, length(gage_results[[i]]))){
+      
+      path <- paste0(getwd(), 
+                     "/gage_results/", 
+                     names(gage_results)[i], 
+                     "_vs_", 
+                     names(gage_results[[i]])[j])
+      dir.create(path = path, recursive = T)
+      setwd(path)
+      
+      write.table(x = gage_results[[i]][[j]]$greater, 
+                  file = paste0(names(gage_results)[i], 
+                                "_vs_", 
+                                names(gage_results[[i]])[j]), 
+                  quote = F, 
+                  sep = "\t", 
+                  row.names = T)
+      
+      #getting real log2 fc from the diff. exprs. results
+      diff_expres_data <- 
+        merged_results_list[[1]][[1]][[diff_exprs_counter]][
+          merged_results_list[[1]][[1]][[diff_exprs_counter]]$padj < 0.1, 7, 
+          drop = F]
+      diff_expres_data$Actuallog2FC[
+        !is.finite(diff_expres_data$Actuallog2FC)] <- NA
+      rownames(diff_expres_data) <- gsub(pattern = "\\.[0-9]+$", 
+                                         replacement = "", 
+                                         x = rownames(diff_expres_data), 
+                                         ignore.case = T)
+      
+      #getting pathway ids from the gage results
+      pathway_ids <- gage_results[[i]][[j]]$greater[, "q.val"] < 0.1 & 
+        !is.na(gage_results[[i]][[j]]$greater[, "q.val"])
+      pathway_ids <- rownames(gage_results[[i]][[j]]$greater)[pathway_ids]
+      pathway_ids <- gsub(pattern = " .*$", 
+                          replacement = "", 
+                          x = pathway_ids, 
+                          ignore.case = T)
+      
+      pathview(gene.data = diff_expres_data, 
+               cpd.data = NULL, 
+               pathway.id = pathway_ids, 
+               species = "mouse", 
+               kegg.dir = path, 
+               gene.idtype = "ENSEMBL", 
+               low = list(gene = "#2a7fff", cpd = "blue"), 
+               mid = list(gene = "gray", cpd = "gray"), 
+               high = list(gene = "#ff5555", cpd = "yellow"), 
+               limit = list(gene = 2, cpd = 1), 
+               bins = list(gene = 20, cpd = 10), 
+               kegg.native = T, 
+               same.layer = T)
+      
+      
+      diff_exprs_counter = diff_exprs_counter + 1
+      
+      setwd(loc_pathview_results)
+    }
+  }
+  setwd(work.dir)
+  
+  
+  #set new path as work directory for coloured pathways to be exported 
+  # there
+  # setwd(new_path)
+  # 
+  # pathview(gene.data = gene.data, 
+  #          cpd.data = NULL,
+  #          pathway.id = pathway_ids, 
+  #          species = "mouse",
+  #          kegg.dir = new_path,
+  #          gene.idtype = "ENSEMBL",
+  #          low = list(gene = "#2a7fff", cpd = "blue"), 
+  #          mid = list(gene = "gray", cpd = "gray"), 
+  #          high = list(gene = "#ff5555", cpd = "yellow"), 
+  #          limit = list(gene = 2, cpd = 1), 
+  #          bins = list(gene = 20, cpd = 10), 
+  #          kegg.native = T)
+  # 
+  # #restore work directory
+  # setwd(loc_workdir)
+
+}
+
+#visualising gage results -- all contrasts together for each pathway
+{
+  #loading differential expression results
+  merged_results_list <- readRDS(file = paste0(loc_diffexprs, 
+                                               "merged_results_list.rds"))
+  
+  selection <- merged_results_list[[1]][[1]][[1]]$padj < 0.01
+  log2fc_matrix <- merged_results_list[[1]][[1]][[1]][selection , 7, drop = F]
+  
+  for(i in seq(2, length(merged_results_list[[1]][[1]]))){
+    selection <- merged_results_list[[1]][[1]][[i]]$padj < 0.01
+    
+    log2fc_matrix <- merge(x = log2fc_matrix, 
+                           y = merged_results_list[[1]][[1]][[i]][
+                             selection, 7, drop = F], 
+                           by = "row.names", 
+                           all = T)
+    rownames(log2fc_matrix) <- log2fc_matrix$Row.names
+    log2fc_matrix$Row.names <- NULL
+  }
+  
+  col_names <- names(merged_results_list[[1]][[1]])
+  col_names <- gsub(pattern = "blood", 
+                    replacement = "Blood", 
+                    x = col_names, 
+                    ignore.case = T)
+  col_names <- gsub(pattern = "spleen_lymphnode_peyerspatches", 
+                    replacement = "Lymphoid", 
+                    x = col_names, 
+                    ignore.case = T)
+  col_names <- gsub(pattern = "intraepitheliallayer_laminaproprialymphocyte", 
+                    replacement = "Gut-associated", 
+                    x = col_names, 
+                    ignore.case = T)
+  col_names <- gsub(pattern = "kidney_lung_liver_pancreas", 
+                    replacement = "Non-lymphoid", 
+                    x = col_names, 
+                    ignore.case = T)
+  colnames(log2fc_matrix) <- col_names
+  rownames(log2fc_matrix) <- gsub(pattern = "\\.[0-9]+$", 
+                                  replacement = "", 
+                                  x = rownames(log2fc_matrix), 
+                                  ignore.case = T)
+  log2fc_matrix <- data.matrix(log2fc_matrix)
+  log2fc_matrix[!is.finite(log2fc_matrix)] <- NA
+  log2fc_matrix <- as.data.frame(log2fc_matrix)
+  
+  pathway_ids <- NULL
+  for(i in seq(1, length(gage_results))){
+    
+    for(j in seq(1, length(gage_results[[i]]))){
+      
+      selection <- gage_results[[i]][[j]]$greater[, "q.val"] < 0.1 & 
+        !is.na(gage_results[[i]][[j]]$greater[, "q.val"])
+      
+      pathway_ids <- c(pathway_ids, 
+                       rownames(gage_results[[i]][[j]]$greater)[selection])
+    }
+  }
+  pathway_ids <- gsub(pattern = " .*$", 
+                      replacement = "", 
+                      x = pathway_ids, 
+                      ignore.case = T)
+  pathway_ids <- unique(pathway_ids)
+  
+  #setting up pathview
+  data(gene.idtype.bods)
+  work.dir <- getwd()
+  setwd(loc_pathview_results)
+  
+  path <- paste0(getwd(), "/gage_results/All/")
+  dir.create(path = path, recursive = T)
+  setwd(path)
+  
+  pathview(gene.data = log2fc_matrix, 
+           cpd.data = NULL, 
+           pathway.id = pathway_ids, 
+           species = "mouse", 
+           kegg.dir = path, 
+           gene.idtype = "ENSEMBL", 
+           gene.annotpkg = "org.Mm.eg.db", 
+           low = list(gene = "#2a7fff", cpd = "blue"), 
+           mid = list(gene = "white", cpd = "gray"), 
+           high = list(gene = "#ff5555", cpd = "yellow"), 
+           # limit = list(gene = ceiling(max(
+           #   abs(max(log2fc_matrix, na.rm = T)),
+           #   abs(min(log2fc_matrix, na.rm = T)))),
+           #   cpd = 1), 
+           plot.col.key= F, #hide plot colour key
+           limit = list(gene = 5, cpd = 1), 
+           bins = list(gene = 20, cpd = 10), 
+           kegg.native = T, 
+           na.col = "gray", 
+           same.layer = F)
+  
+  setwd(work.dir)
+  
+}
+
+#visualising gut sigs and nonlymph sigs only from full gage results
+## because running age on just those genes does not give (significant) results
+{
+  #formatting the data
+  {
+    #reading in gut sig and non-lymph sig
+    gut_sigs <- read.delim(file = paste0(loc_pathview_results, 
+                                         "gut_sigs.tab"), 
+                           sep = "\t", 
+                           stringsAsFactors = F)
+    nonlymph_sigs <- read.delim(file = paste0(loc_pathview_results, 
+                                              "non-lymph_sigs.tab"), 
+                           sep = "\t", 
+                           stringsAsFactors = F)
+  }
+  
+  #loading differential expression results
+  merged_results_list <- readRDS(file = paste0(loc_diffexprs, 
+                                               "merged_results_list.rds"))
+  
+  selection <- merged_results_list[[1]][[1]][[1]]$padj < 0.01
+  log2fc_matrix <- merged_results_list[[1]][[1]][[1]][selection , 7, drop = F]
+  
+  for(i in seq(2, length(merged_results_list[[1]][[1]]))){
+    selection <- merged_results_list[[1]][[1]][[i]]$padj < 0.01
+    
+    log2fc_matrix <- merge(x = log2fc_matrix, 
+                           y = merged_results_list[[1]][[1]][[i]][
+                             selection, 7, drop = F], 
+                           by = "row.names", 
+                           all = T)
+    rownames(log2fc_matrix) <- log2fc_matrix$Row.names
+    log2fc_matrix$Row.names <- NULL
+  }
+  
+  col_names <- names(merged_results_list[[1]][[1]])
+  col_names <- gsub(pattern = "blood", 
+                    replacement = "Blood", 
+                    x = col_names, 
+                    ignore.case = T)
+  col_names <- gsub(pattern = "spleen_lymphnode_peyerspatches", 
+                    replacement = "Lymphoid", 
+                    x = col_names, 
+                    ignore.case = T)
+  col_names <- gsub(pattern = "intraepitheliallayer_laminaproprialymphocyte", 
+                    replacement = "Gut-associated", 
+                    x = col_names, 
+                    ignore.case = T)
+  col_names <- gsub(pattern = "kidney_lung_liver_pancreas", 
+                    replacement = "Non-lymphoid", 
+                    x = col_names, 
+                    ignore.case = T)
+  colnames(log2fc_matrix) <- col_names
+  rownames(log2fc_matrix) <- gsub(pattern = "\\.[0-9]+$", 
+                                  replacement = "", 
+                                  x = rownames(log2fc_matrix), 
+                                  ignore.case = T)
+  log2fc_matrix <- data.matrix(log2fc_matrix)
+  log2fc_matrix[!is.finite(log2fc_matrix)] <- NA
+  log2fc_matrix <- as.data.frame(log2fc_matrix)
+  
+  pathway_ids <- NULL
+  for(i in seq(1, length(gage_results))){
+    
+    for(j in seq(1, length(gage_results[[i]]))){
+      
+      selection <- gage_results[[i]][[j]]$greater[, "q.val"] < 0.1 & 
+        !is.na(gage_results[[i]][[j]]$greater[, "q.val"])
+      
+      pathway_ids <- c(pathway_ids, 
+                       rownames(gage_results[[i]][[j]]$greater)[selection])
+    }
+  }
+  pathway_ids <- gsub(pattern = " .*$", 
+                      replacement = "", 
+                      x = pathway_ids, 
+                      ignore.case = T)
+  pathway_ids <- unique(pathway_ids)
+  
+  #setting up pathview for Gut_sigs
+  data(gene.idtype.bods)
+  work.dir <- getwd()
+  setwd(loc_pathview_results)
+  
+  path <- paste0(getwd(), "/gage_results/Gut_sigs/")
+  dir.create(path = path, recursive = T)
+  setwd(path)
+  
+  pathview(gene.data = log2fc_matrix[rownames(log2fc_matrix) %in% 
+                                       gut_sigs$Gene.stable.ID,], 
+           cpd.data = NULL, 
+           pathway.id = pathway_ids, 
+           species = "mouse", 
+           kegg.dir = path, 
+           gene.idtype = "ENSEMBL", 
+           gene.annotpkg = "org.Mm.eg.db", 
+           low = list(gene = "#2a7fff", cpd = "blue"), 
+           mid = list(gene = "white", cpd = "gray"), 
+           high = list(gene = "#ff5555", cpd = "yellow"), 
+           # limit = list(gene = ceiling(max(
+           #   abs(max(log2fc_matrix, na.rm = T)),
+           #   abs(min(log2fc_matrix, na.rm = T)))),
+           #   cpd = 1), 
+           limit = list(gene = 5, cpd = 1), 
+           bins = list(gene = 20, cpd = 10), 
+           kegg.native = T, 
+           na.col = "gray", 
+           same.layer = F)
+  
+  setwd(work.dir)
+  
+  #setting up pathview for Nonlymph_sigs
+  work.dir <- getwd()
+  setwd(loc_pathview_results)
+  
+  path <- paste0(getwd(), "/gage_results/Nonlymph_sigs/")
+  dir.create(path = path, recursive = T)
+  setwd(path)
+  
+  pathview(gene.data = log2fc_matrix[rownames(log2fc_matrix) %in% 
+                                       nonlymph_sigs$Gene.stable.ID,], 
+           cpd.data = NULL, 
+           pathway.id = pathway_ids, 
+           species = "mouse", 
+           kegg.dir = path, 
+           gene.idtype = "ENSEMBL", 
+           gene.annotpkg = "org.Mm.eg.db", 
+           low = list(gene = "#2a7fff", cpd = "blue"), 
+           mid = list(gene = "white", cpd = "gray"), 
+           high = list(gene = "#ff5555", cpd = "yellow"), 
+           # limit = list(gene = ceiling(max(
+           #   abs(max(log2fc_matrix, na.rm = T)),
+           #   abs(min(log2fc_matrix, na.rm = T)))),
+           #   cpd = 1), 
+           limit = list(gene = 5, cpd = 1), 
+           bins = list(gene = 20, cpd = 10), 
+           kegg.native = T, 
+           na.col = "gray", 
+           same.layer = F)
+  
+  setwd(work.dir)
+  
+}
+
+
+#calculating mean log2 exp based on tissue and cell type
+{
+  condition_labels <- unique(gsub("_([^_]*)$", "", colnames(norm_counts)))
+  #names(condition_labels) <- rep(expected_tissues, each = 2)
+  
+  # mean_norm_counts <- data.frame(matrix(nrow = nrow(norm_counts), ncol = 0))
+  mean_norm_exp <- data.frame(matrix(nrow = nrow(norm_counts), ncol = 0))
+  
+  #iterate thorugh condition labels and calculate means for Tregs
+  for(i in seq(1, length(condition_labels))){
+    
+    columns <- norm_counts[, grepl(pattern = paste0(
+      condition_labels[i], "_[0-9]{1}$"), 
+      x = colnames(norm_counts), 
+      ignore.case = T), 
+      drop = F]
+    
+    #tested the logic via the following code
+    # temp <- matrix(c(1:3,NaN,4,Inf,5:6, 7:10),4,3)
+    # rowMeans(temp)
+    # temp2 <- temp * is.finite(temp)
+    # rowMeans(temp2)
+    
+    log2_cols <- as.matrix(log2(columns))
+    #this produces NaNs for Infs which are then ignored via na.rm = T
+    log2_cols <- log2_cols * is.finite(log2_cols)
+    
+    if(ncol(columns)>1){
+      # log2_cols <- as.matrix(log2(columns))
+      # #this produces NaNs for Infs which are then ignored
+      # log2_cols <- log2_cols * is.finite(log2_cols)
+      # print(head(log2_cols[!is.finite(log2_cols[,1]) | 
+      #                        !is.finite(log2_cols)[,2] | 
+      #                        !is.finite(log2_cols)[,3],]))
+      mean_norm_exp <- cbind(mean_norm_exp, 
+                             rowMeans(log2_cols, na.rm = T)
+                             )
+    }
+    else mean_norm_exp <- cbind(mean_norm_exp, log2_cols)
+    # else mean_norm_exp <- cbind(mean_norm_exp,
+    #                             log2(columns))
+    
+    colnames(mean_norm_exp)[ncol(mean_norm_exp)] <-
+        paste0(gsub(pattern = "_[0-9]{1}$", 
+                    replacement = "", 
+                    x = condition_labels[i], 
+                    ignore.case = T))
+  }
+  #removing iteration related variables
+  rm(i, columns)
+  
+  mean_norm_exp <- mean_norm_exp[complete.cases(mean_norm_exp),]
+}
+
+#visualising gage results with mean_norm_exp of tissue groups instead
+{
+  #calculating tissue group means of mean_norm_exp
+  {
+    mean_norm_exp_groups <- mean_norm_exp[, grepl(pattern = "_T", 
+                                                  x = colnames(mean_norm_exp), 
+                                                  ignore.case = T)]
+    mean_norm_exp_groups$`Gut-associated` <- 
+      rowMeans(x = mean_norm_exp[, c(2,4)], 
+               na.rm = T)
+    mean_norm_exp_groups$`Lymphoid` <- 
+      rowMeans(x = mean_norm_exp[, c(7,9,10)], 
+               na.rm = T)
+    mean_norm_exp_groups$`Non-lymphoid` <- 
+      rowMeans(x = mean_norm_exp[, c(3,5,6,8)], 
+               na.rm = T)
+    
+    mean_norm_exp_groups <- mean_norm_exp_groups[,-c(2:10)]
+    mean_norm_exp_groups <- 
+      mean_norm_exp_groups[!is.na(rowMeans(mean_norm_exp_groups, na.rm = T)),]
+    
+    rownames(mean_norm_exp_groups) <- gsub(pattern = "\\.[0-9]+$", 
+                                           replacement = "", 
+                                           x = rownames(mean_norm_exp_groups), 
+                                           ignore.case = T)
+    
+  }
+  
+  
+  #loading differential expression results
+  merged_results_list <- readRDS(file = paste0(loc_diffexprs, 
+                                               "merged_results_list.rds"))
+  
+  #setting up pathview
+  data(gene.idtype.bods)
+  work.dir <- getwd()
+  setwd(loc_pathview_results)
+  #path <- loc_pathview_results
+  diff_exprs_counter = 1
+  for(i in seq(1, length(gage_results))){
+    #path <- paste0(getwd(), "/", names(gage_results)[i], "/")
+    #dir.create(path = path, recursive = T)
+    #setwd(path)
+    for(j in seq(1, length(gage_results[[i]]))){
+      
+      path <- paste0(getwd(), 
+                     "/gage_results/", 
+                     names(gage_results)[i], 
+                     "_vs_", 
+                     names(gage_results[[i]])[j])
+      dir.create(path = path, recursive = T)
+      setwd(path)
+      
+      write.table(x = gage_results[[i]][[j]]$greater, 
+                  file = paste0(names(gage_results)[i], 
+                                "_vs_", 
+                                names(gage_results[[i]])[j]), 
+                  quote = F, 
+                  sep = "\t", 
+                  row.names = T)
+      
+      # #getting real log2 fc from the diff. exprs. results
+      # diff_expres_data <- 
+      #   merged_results_list[[1]][[1]][[diff_exprs_counter]][
+      #     merged_results_list[[1]][[1]][[diff_exprs_counter]]$padj < 0.1, 7, 
+      #     drop = F]
+      # diff_expres_data$Actuallog2FC[
+      #   !is.finite(diff_expres_data$Actuallog2FC)] <- NA
+      # rownames(diff_expres_data) <- gsub(pattern = "\\.[0-9]+$", 
+      #                                    replacement = "", 
+      #                                    x = rownames(diff_expres_data), 
+      #                                    ignore.case = T)
+      
+      #getting pathway ids from the gage results
+      pathway_ids <- gage_results[[i]][[j]]$greater[, "q.val"] < 0.1 & 
+        !is.na(gage_results[[i]][[j]]$greater[, "q.val"])
+      pathway_ids <- rownames(gage_results[[i]][[j]]$greater)[pathway_ids]
+      pathway_ids <- gsub(pattern = " .*$", 
+                          replacement = "", 
+                          x = pathway_ids, 
+                          ignore.case = T)
+      
+      pathview(#gene.data = diff_expres_data, 
+               gene.data = mean_norm_exp_groups, 
+               cpd.data = NULL, 
+               pathway.id = pathway_ids, 
+               species = "mouse", 
+               kegg.dir = path, 
+               gene.idtype = "ENSEMBL", 
+               #low = list(gene = "#2a7fff", cpd = "blue"), 
+               low = list(gene = "white", cpd = "blue"), 
+               mid = list(gene = "#ffaaaa", cpd = "gray"), 
+               high = list(gene = "#ff2a2a", cpd = "yellow"), 
+               na.col = "gray", 
+               limit = list(gene = c(0,20), cpd = 1), 
+               bins = list(gene = 10, cpd = 10), 
+               kegg.native = T)
+      
+      
+      diff_exprs_counter = diff_exprs_counter + 1
+      
+      setwd(loc_pathview_results)
+    }
+  }
+  setwd(work.dir)
+
+}
+
+
+```
+
+
+#GSEA analysis for Gut sig genes and Non-lymph sig genes ## no longer needed
+```{r}
+
+#reading in DESeq2 outputs
+{
+  #read normalised counts from the '#writing out the differential expression 
+  # files' code block to get them filtered by min transcripts per cell
+  #reading norm counts
+  norm_counts <- read.delim(file = paste0(loc_counts, "normalised_counts.txt"),
+                            sep = "\t",
+                            stringsAsFactors = F)
+  #norm_counts <- norm_counts[rowSums(as.matrix(norm_counts))>0,]
+  
+  #reading the DESeq2 analysis output table
+  merged_results_list <- readRDS(file = paste0(loc_diffexprs, 
+                                        "merged_results_list.rds"))
+  
+  contrast_groups <- list(c("Blood"), 
+                          c("Spleen", "Lymph Node", "Peyer's Patches"), 
+                          c("Intraepithelial Layer", 
+                            "Lamina Propria Lymphocyte"), 
+                          c("Kidney", "Lung", "Liver", "Pancreas"),
+                          c("cellTypeT"),
+                          c("cellTypeNT"))
+  
+  #ensuring that names in contrast_groups list are all lower letter and do not 
+  # contain spaces or punctuation
+  for(i in seq(1, length(contrast_groups)))
+  {
+    contrast_groups[[i]] <- tolower(unique(
+      gsub("_.*|[[:space:]]|[[:punct:]]", "", contrast_groups[[i]])
+      ))
+  }
+  rm(i)
+  names(contrast_groups) <- c("Blood", 
+                              "Lymphoid", 
+                              "Gut-Associated", 
+                              "Non-Lymphoid", 
+                              "Treg", 
+                              "Tconv")
+  
+  # # output_table <- read.delim(file = paste0(loc_diffexprs_merged,
+  # #                                          "output_table_combined.txt"),
+  # #                            sep = "\t", stringsAsFactors = F)
+  # output_table <- read.delim(file = paste0(loc_diffexprs_merged,
+  #                                          "output_table.txt"),
+  #                            sep = "\t", stringsAsFactors = F)
+  # 
+  # colnames(output_table) <- output_table[3,]
+  # output_table <- output_table[-(1:3),]
+  # 
+  # mean_norm_counts <- output_table[, c(1, 44:63)]
+  # rownames(mean_norm_counts) <- mean_norm_counts$`Gene stable ID`
+  # mean_norm_counts$`Gene stable ID` <- NULL
+  # # rownames(mean_norm_counts) <- gsub(pattern = "\\.[0-9]+$",
+  # #                                    replacement = "",
+  # #                                    x = rownames(mean_norm_counts),
+  # #                                    ignore.case = T)
+  # #mean_norm_counts$`Gene stable ID` <- output_table$`Gene stable ID`
+  # #colnames(temp) <- temp[3,]
+  # #temp <- temp[4:nrow(temp),]
+  
+}
+
+#running gage analysis
+{
+  #formatting the data
+  {
+    #reading in gut sig and non-lymph sig
+    gut_sigs <- read.delim(file = paste0(loc_pathview_results, 
+                                         "gut_sigs.tab"), 
+                           sep = "\t", 
+                           stringsAsFactors = F)
+    nonlymph_sigs <- read.delim(file = paste0(loc_pathview_results, 
+                                              "non-lymph_sigs.tab"), 
+                           sep = "\t", 
+                           stringsAsFactors = F)
+    blood_sigs <- read.delim(file = paste0(loc_pathview_results, 
+                                              "blood_sig_down.tab"), 
+                           sep = "\t", 
+                           stringsAsFactors = F)
+    
+    gut_sigs <- as.data.frame(id2eg(ids = gut_sigs$Gene.stable.ID, 
+                                    category = "ENSEMBL", 
+                                    org = "mouse", 
+                                    na.rm = F))
+    gut_sigs$ENTREZID[gut_sigs$ENTREZID == "NA"] <- NA
+    gut_sigs$ENTREZID <- gsub(pattern = ";.*$", 
+                              replacement = "", 
+                              x = gut_sigs$ENTREZID, 
+                              ignore.case = T)
+    
+    nonlymph_sigs <- as.data.frame(id2eg(ids = nonlymph_sigs$Gene.stable.ID, 
+                                         category = "ENSEMBL", 
+                                         org = "mouse", 
+                                         na.rm = F))
+    nonlymph_sigs$ENTREZID[nonlymph_sigs$ENTREZID == "NA"] <- NA
+    nonlymph_sigs$ENTREZID <- gsub(pattern = ";.*$", 
+                                   replacement = "", 
+                                   x = nonlymph_sigs$ENTREZID, 
+                                   ignore.case = T)
+    
+    blood_sigs <- as.data.frame(id2eg(ids = blood_sigs$Gene.stable.ID, 
+                                         category = "ENSEMBL", 
+                                         org = "mouse", 
+                                         na.rm = F))
+    blood_sigs$ENTREZID[blood_sigs$ENTREZID == "NA"] <- NA
+    blood_sigs$ENTREZID <- gsub(pattern = ";.*$", 
+                                   replacement = "", 
+                                   x = blood_sigs$ENTREZID, 
+                                   ignore.case = T)
+    
+    #reading in normalised counts
+    norm_log2_gut <- norm_counts
+    rownames(norm_log2_gut) <- gsub(pattern = "\\.[0-9]+$", 
+                                    replacement = "", 
+                                    x = rownames(norm_log2_gut), 
+                                    ignore.case = T)
+    norm_log2_gut <- norm_log2_gut[rownames(norm_log2_gut) %in% 
+                                     gut_sigs$ENSEMBL, ]
+    norm_log2_gut <- log2(data.matrix(norm_log2_gut))
+    norm_log2_gut[!is.finite(norm_log2_gut)] <- NA
+    norm_log2_gut <- as.data.frame(norm_log2_gut)
+    norm_log2_gut$ENSEMBL <- rownames(norm_log2_gut)
+    norm_log2_gut <- merge(x = norm_log2_gut, y = gut_sigs, by = "ENSEMBL")
+    #norm_log2_gut <- norm_log2_gut[complete.cases(norm_log2_gut),]
+    norm_log2_gut <- norm_log2_gut[!is.na(norm_log2_gut$ENTREZID),]
+    rownames(norm_log2_gut) <- norm_log2_gut$ENTREZID
+    norm_log2_gut$ENSEMBL <- NULL
+    norm_log2_gut$ENTREZID <- NULL
+    
+    norm_log2_nonlymph <- norm_counts
+    rownames(norm_log2_nonlymph) <- gsub(pattern = "\\.[0-9]+$", 
+                                         replacement = "", 
+                                         x = rownames(norm_log2_nonlymph), 
+                                         ignore.case = T)
+    norm_log2_nonlymph <- norm_log2_nonlymph[rownames(norm_log2_nonlymph) %in% 
+                                               nonlymph_sigs$ENSEMBL, ]
+    norm_log2_nonlymph <- log2(data.matrix(norm_log2_nonlymph))
+    norm_log2_nonlymph[!is.finite(norm_log2_nonlymph)] <- NA
+    norm_log2_nonlymph <- as.data.frame(norm_log2_nonlymph)
+    norm_log2_nonlymph$ENSEMBL <- rownames(norm_log2_nonlymph)
+    norm_log2_nonlymph <- merge(x = norm_log2_nonlymph, y = nonlymph_sigs, 
+                                by = "ENSEMBL")
+    #norm_log2_nonlymph <- norm_log2_nonlymph[complete.cases(norm_log2_nonlymph),]
+    norm_log2_nonlymph <- norm_log2_nonlymph[!is.na(norm_log2_nonlymph$ENTREZID),]
+    rownames(norm_log2_nonlymph) <- norm_log2_nonlymph$ENTREZID
+    norm_log2_nonlymph$ENSEMBL <- NULL
+    norm_log2_nonlymph$ENTREZID <- NULL
+    
+    norm_log2_blood <- norm_counts
+    rownames(norm_log2_blood) <- gsub(pattern = "\\.[0-9]+$", 
+                                         replacement = "", 
+                                         x = rownames(norm_log2_blood), 
+                                         ignore.case = T)
+    norm_log2_blood <- norm_log2_blood[rownames(norm_log2_blood) %in% 
+                                               blood_sigs$ENSEMBL, ]
+    norm_log2_blood <- log2(data.matrix(norm_log2_blood))
+    norm_log2_blood[!is.finite(norm_log2_blood)] <- NA
+    norm_log2_blood <- as.data.frame(norm_log2_blood)
+    norm_log2_blood$ENSEMBL <- rownames(norm_log2_blood)
+    norm_log2_blood <- merge(x = norm_log2_blood, y = blood_sigs, 
+                                by = "ENSEMBL")
+    #norm_log2_nonlymph <- norm_log2_nonlymph[complete.cases(norm_log2_nonlymph),]
+    norm_log2_blood <- norm_log2_blood[!is.na(norm_log2_blood$ENTREZID),]
+    rownames(norm_log2_blood) <- norm_log2_blood$ENTREZID
+    norm_log2_blood$ENSEMBL <- NULL
+    norm_log2_blood$ENTREZID <- NULL
+    
+    #formatting column headers
+    {
+      colnames(norm_log2_gut) <- gsub(pattern = "_NT_", 
+                                      replacement = "_Tconv_", 
+                                      x = gsub(pattern = "_T_", 
+                                               replacement = "_Treg_", 
+                                               x = colnames(norm_log2_gut), 
+                                               ignore.case = T), 
+                                      ignore.case = T)
+      colnames(norm_log2_nonlymph) <- gsub(pattern = "_NT_", 
+                                           replacement = "_Tconv_", 
+                                           x = gsub(pattern = "_T_", 
+                                                    replacement = "_Treg_", 
+                                                    x = colnames(
+                                                      norm_log2_nonlymph), 
+                                                    ignore.case = T), 
+                                           ignore.case = T)
+      colnames(norm_log2_blood) <- gsub(pattern = "_NT_", 
+                                           replacement = "_Tconv_", 
+                                           x = gsub(pattern = "_T_", 
+                                                    replacement = "_Treg_", 
+                                                    x = colnames(
+                                                      norm_log2_blood), 
+                                                    ignore.case = T), 
+                                           ignore.case = T)
+      
+      colnames(norm_log2_gut) <- gsub(pattern = "IntraEpithelialLayer", 
+                                      replacement = "IEL", 
+                                      x = colnames(norm_log2_gut), 
+                                      ignore.case = T)
+      colnames(norm_log2_gut) <- gsub(pattern = "LaminaPropriaLymphocyte", 
+                                      replacement = "LPL", 
+                                      x = colnames(norm_log2_gut), 
+                                      ignore.case = T)
+      colnames(norm_log2_gut) <- gsub(pattern = "LymphNode", 
+                                      replacement = "LN", 
+                                      x = colnames(norm_log2_gut), 
+                                      ignore.case = T)
+      colnames(norm_log2_gut) <- gsub(pattern = "PeyersPatches", 
+                                      replacement = "PP", 
+                                      x = colnames(norm_log2_gut), 
+                                      ignore.case = T)
+      
+      colnames(norm_log2_nonlymph) <- gsub(pattern = "IntraEpithelialLayer", 
+                                           replacement = "IEL", 
+                                           x = colnames(norm_log2_nonlymph), 
+                                           ignore.case = T)
+      colnames(norm_log2_nonlymph) <- gsub(pattern = "LaminaPropriaLymphocyte", 
+                                           replacement = "LPL", 
+                                           x = colnames(norm_log2_nonlymph), 
+                                           ignore.case = T)
+      colnames(norm_log2_nonlymph) <- gsub(pattern = "LymphNode", 
+                                           replacement = "LN", 
+                                           x = colnames(norm_log2_nonlymph), 
+                                           ignore.case = T)
+      colnames(norm_log2_nonlymph) <- gsub(pattern = "PeyersPatches", 
+                                           replacement = "PP", 
+                                           x = colnames(norm_log2_nonlymph), 
+                                           ignore.case = T)
+      
+      colnames(norm_log2_blood) <- gsub(pattern = "IntraEpithelialLayer", 
+                                           replacement = "IEL", 
+                                           x = colnames(norm_log2_blood), 
+                                           ignore.case = T)
+      colnames(norm_log2_blood) <- gsub(pattern = "LaminaPropriaLymphocyte", 
+                                           replacement = "LPL", 
+                                           x = colnames(norm_log2_blood), 
+                                           ignore.case = T)
+      colnames(norm_log2_blood) <- gsub(pattern = "LymphNode", 
+                                           replacement = "LN", 
+                                           x = colnames(norm_log2_blood), 
+                                           ignore.case = T)
+      colnames(norm_log2_blood) <- gsub(pattern = "PeyersPatches", 
+                                           replacement = "PP", 
+                                           x = colnames(norm_log2_blood), 
+                                           ignore.case = T)
+      
+    }
+  }
+  
+  kegg_genesets <- readRDS(file = paste0(loc_pathview_results,
+                                         "kegg_genesets.rds"))
+  
+  #removing mmu05206 as it produces the "Error in img[pidx[i, 3]:pidx[i, 4], 
+  # sel.px, 1:3] : only 0's may be mixed with negative subscripts" error in
+  # pathview()
+  # kegg_genesets$kg.sets <- 
+  #   kegg_genesets$kg.sets[-grep(pattern = "mmu05206", 
+  #                               x = names(kegg_genesets$kg.sets), 
+  #                               ignore.case = T)]
+  
+  #formatting column indices for comparison in groups
+  indices <- list(grep(pattern = "Blood_Treg", 
+                       x = colnames(norm_counts_ncbi), 
+                       ignore.case = T), 
+                  grep(pattern = "(Spleen|LN|PP)_Treg", 
+                       x = colnames(norm_counts_ncbi), 
+                       ignore.case = T), 
+                  grep(pattern = "(IEL|LPL)_Treg", 
+                       x = colnames(norm_counts_ncbi), 
+                       ignore.case = T), 
+                  grep(pattern = "(Kidney|Liver|Lung|Pancreas)_Treg", 
+                       x = colnames(norm_counts_ncbi), 
+                       ignore.case = T))
+  names(indices) <- c("Blood", "Lymphoid", "Gut-associated", "Non-lymphoid")
+  
+  #gage analysis
+  gage_results_gut <- NULL
+  for(i in seq(1, length(indices))){
+    
+    if(i == 3) next
+    
+    gage_results_gut <- append(gage_results_gut, list())
+    
+    gage_results_gut[length(gage_results_gut)+1] <- 
+      gage(exprs = norm_log2_gut, 
+           gsets = kegg_genesets$kg.sets, 
+           ref = indices[[3]], 
+           samp = indices[[i]], 
+           same.dir = F, 
+           compare = "as.group", 
+           set.size = c(1, 1000)
+           )
+    
+    names(gage_results_gut)[length(gage_results_gut)] <- 
+      paste0("_vs_", names(indices)[i])
+    
+  }
+  
+  
+  gage_results_nonlymph <- NULL
+  for(i in seq(length(indices))){
+    
+    if(i == 4) next
+    
+    gage_results_nonlymph <- append(gage_results_nonlymph, list())
+    
+    gage_results_nonlymph[length(gage_results_nonlymph)+1] <- 
+      gage(exprs = norm_log2_nonlymph, 
+           gsets = kegg_genesets$kg.sets, 
+           ref = indices[[4]], 
+           samp = indices[[i]], 
+           same.dir = F, 
+           compare = "as.group", 
+           set.size = c(1, 1000)
+           )
+    
+    names(gage_results_nonlymph)[length(gage_results_nonlymph)] <- 
+      paste0("_vs_", names(indices)[i])
+    
+  }
+  
+  
+  gage_results_blood <- NULL
+  for(i in seq(length(indices))){
+    
+    if(i == 1) next
+    
+    gage_results_blood <- append(gage_results_blood, list())
+    
+    gage_results_blood[length(gage_results_blood)+1] <- 
+      gage(exprs = norm_log2_blood, 
+           gsets = kegg_genesets$kg.sets, 
+           ref = indices[[1]], 
+           samp = indices[[i]], 
+           same.dir = F, 
+           compare = "as.group", 
+           set.size = c(1, 1000)
+           )
+    
+    names(gage_results_blood)[length(gage_results_blood)] <- 
+      paste0("_vs_", names(indices)[i])
+    
+  }
+  
+  
+  saveRDS(object = gage_results_gut, file = paste0(loc_pathview_results, 
+                                               "gage_results_gut.rds"))
+  saveRDS(object = gage_results_nonlymph, file = paste0(loc_pathview_results, 
+                                               "gage_results_nonlymph.rds"))
+  saveRDS(object = gage_results_blood, file = paste0(loc_pathview_results, 
+                                               "gage_results_blood.rds"))
+  
+  
+}
+
+#visualising gage results -- Gut sigs only -- no gene set has q.val < 0.1
+# Nonlymphoid has all NA gene sets so not point in visualising
+{
+  #loading differential expression results
+  merged_results_list <- readRDS(file = paste0(loc_diffexprs, 
+                                               "merged_results_list.rds"))
+  
+  #gut-associated results are index 2, 4 and 6
+  
+  selection <- merged_results_list[[1]][[1]][[2]]$padj < 0.01
+  log2fc_matrix <- merged_results_list[[1]][[1]][[2]][selection , 7, drop = F]
+  
+  for(i in c(4, 6)){
+    selection <- merged_results_list[[1]][[1]][[i]]$padj < 0.01
+    
+    log2fc_matrix <- merge(x = log2fc_matrix, 
+                           y = merged_results_list[[1]][[1]][[i]][
+                             selection, 7, drop = F], 
+                           by = "row.names", 
+                           all = T)
+    rownames(log2fc_matrix) <- log2fc_matrix$Row.names
+    log2fc_matrix$Row.names <- NULL
+  }
+  
+  col_names <- names(merged_results_list[[1]][[1]])[c(2,4,6)]
+  col_names <- gsub(pattern = "blood", 
+                    replacement = "Blood", 
+                    x = col_names, 
+                    ignore.case = T)
+  col_names <- gsub(pattern = "spleen_lymphnode_peyerspatches", 
+                    replacement = "Lymphoid", 
+                    x = col_names, 
+                    ignore.case = T)
+  col_names <- gsub(pattern = "intraepitheliallayer_laminaproprialymphocyte", 
+                    replacement = "Gut-associated", 
+                    x = col_names, 
+                    ignore.case = T)
+  col_names <- gsub(pattern = "kidney_lung_liver_pancreas", 
+                    replacement = "Non-lymphoid", 
+                    x = col_names, 
+                    ignore.case = T)
+  colnames(log2fc_matrix) <- col_names
+  rownames(log2fc_matrix) <- gsub(pattern = "\\.[0-9]+$", 
+                                  replacement = "", 
+                                  x = rownames(log2fc_matrix), 
+                                  ignore.case = T)
+  log2fc_matrix <- data.matrix(log2fc_matrix)
+  log2fc_matrix[!is.finite(log2fc_matrix)] <- NA
+  log2fc_matrix <- as.data.frame(log2fc_matrix)
+  log2fc_matrix[,1] <- log2fc_matrix[,1]*-1
+  log2fc_matrix[,2] <- log2fc_matrix[,2]*-1
+  colnames(log2fc_matrix)[1] <- "Gut-associated__Vs__Blood"
+  colnames(log2fc_matrix)[1] <- "Gut-associated__Vs__Lymphoid"
+  
+  pathway_ids <- NULL
+  for(i in seq(1, length(gage_results_gut))){
+    selection <- gage_results_gut[[i]][, "q.val"] < 0.1 & 
+      !is.na(gage_results_gut[[i]][, "q.val"])
+    
+    pathway_ids <- c(pathway_ids, 
+                     rownames(gage_results_gut[[i]])[selection])
+  }
+  pathway_ids <- gsub(pattern = " .*$", 
+                      replacement = "", 
+                      x = pathway_ids, 
+                      ignore.case = T)
+  pathway_ids <- unique(pathway_ids)
+  
+  #setting up pathview
+  data(gene.idtype.bods)
+  work.dir <- getwd()
+  setwd(loc_pathview_results)
+  
+  path <- paste0(getwd(), "/gage_results_gut/All/")
+  dir.create(path = path, recursive = T)
+  setwd(path)
+  
+  pathview(gene.data = log2fc_matrix, 
+           cpd.data = NULL, 
+           pathway.id = pathway_ids, 
+           species = "mouse", 
+           kegg.dir = path, 
+           gene.idtype = "ENSEMBL", 
+           gene.annotpkg = "org.Mm.eg.db", 
+           low = list(gene = "#2a7fff", cpd = "blue"), 
+           mid = list(gene = "white", cpd = "gray"), 
+           high = list(gene = "#ff5555", cpd = "yellow"), 
+           # limit = list(gene = ceiling(max(
+           #   abs(max(log2fc_matrix, na.rm = T)),
+           #   abs(min(log2fc_matrix, na.rm = T)))),
+           #   cpd = 1), 
+           limit = list(gene = 5, cpd = 1), 
+           bins = list(gene = 20, cpd = 10), 
+           kegg.native = T, 
+           na.col = "gray", 
+           same.layer = F)
+  
+  setwd(work.dir)
+  
+}
+
+
+#visualising gage blood sigs results
+{
+  #loading differential expression results
+  merged_results_list <- readRDS(file = paste0(loc_diffexprs, 
+                                               "merged_results_list.rds"))
+  
+  #blood results are index 1, 2 and 3
+  
+  selection <- merged_results_list[[1]][[1]][[1]]$padj < 0.01
+  log2fc_matrix <- merged_results_list[[1]][[1]][[1]][selection , 7, drop = F]
+  
+  for(i in c(2, 3)){
+    selection <- merged_results_list[[1]][[1]][[i]]$padj < 0.01
+    
+    log2fc_matrix <- merge(x = log2fc_matrix, 
+                           y = merged_results_list[[1]][[1]][[i]][
+                             selection, 7, drop = F], 
+                           by = "row.names", 
+                           all = T)
+    rownames(log2fc_matrix) <- log2fc_matrix$Row.names
+    log2fc_matrix$Row.names <- NULL
+  }
+  
+  col_names <- names(merged_results_list[[1]][[1]])[c(1,2,3)]
+  col_names <- gsub(pattern = "blood", 
+                    replacement = "Blood", 
+                    x = col_names, 
+                    ignore.case = T)
+  col_names <- gsub(pattern = "spleen_lymphnode_peyerspatches", 
+                    replacement = "Lymphoid", 
+                    x = col_names, 
+                    ignore.case = T)
+  col_names <- gsub(pattern = "intraepitheliallayer_laminaproprialymphocyte", 
+                    replacement = "Gut-associated", 
+                    x = col_names, 
+                    ignore.case = T)
+  col_names <- gsub(pattern = "kidney_lung_liver_pancreas", 
+                    replacement = "Non-lymphoid", 
+                    x = col_names, 
+                    ignore.case = T)
+  colnames(log2fc_matrix) <- col_names
+  rownames(log2fc_matrix) <- gsub(pattern = "\\.[0-9]+$", 
+                                  replacement = "", 
+                                  x = rownames(log2fc_matrix), 
+                                  ignore.case = T)
+  log2fc_matrix <- data.matrix(log2fc_matrix)
+  log2fc_matrix[!is.finite(log2fc_matrix)] <- NA
+  log2fc_matrix <- as.data.frame(log2fc_matrix)
+  #log2fc_matrix[,1] <- log2fc_matrix[,1]*-1
+  #log2fc_matrix[,2] <- log2fc_matrix[,2]*-1
+  #colnames(log2fc_matrix)[1] <- "Gut-associated__Vs__Blood"
+  #colnames(log2fc_matrix)[1] <- "Gut-associated__Vs__Lymphoid"
+  
+  pathway_ids <- NULL
+  for(i in seq(1, length(gage_results_blood))){
+    selection <- gage_results_blood[[i]][, "q.val"] < 0.1 & 
+      !is.na(gage_results_blood[[i]][, "q.val"])
+    
+    pathway_ids <- c(pathway_ids, 
+                     rownames(gage_results_blood[[i]])[selection])
+  }
+  pathway_ids <- gsub(pattern = " .*$", 
+                      replacement = "", 
+                      x = pathway_ids, 
+                      ignore.case = T)
+  pathway_ids <- unique(pathway_ids)
+  
+  #setting up pathview
+  data(gene.idtype.bods)
+  work.dir <- getwd()
+  setwd(loc_pathview_results)
+  
+  path <- paste0(getwd(), "/gage_results_blood/All/")
+  dir.create(path = path, recursive = T)
+  setwd(path)
+  
+  pathview(gene.data = log2fc_matrix, 
+           cpd.data = NULL, 
+           pathway.id = pathway_ids, 
+           species = "mouse", 
+           kegg.dir = path, 
+           gene.idtype = "ENSEMBL", 
+           gene.annotpkg = "org.Mm.eg.db", 
+           low = list(gene = "#2a7fff", cpd = "blue"), 
+           mid = list(gene = "white", cpd = "gray"), 
+           high = list(gene = "#ff5555", cpd = "yellow"), 
+           # limit = list(gene = ceiling(max(
+           #   abs(max(log2fc_matrix, na.rm = T)),
+           #   abs(min(log2fc_matrix, na.rm = T)))),
+           #   cpd = 1), 
+           limit = list(gene = 5, cpd = 1), 
+           bins = list(gene = 20, cpd = 10), 
+           kegg.native = T, 
+           na.col = "gray", 
+           same.layer = F)
+  
+  setwd(work.dir)
+  
+}
+
+
+```
+
+
+#visualising gage results via clusterProfiler library ##run preliminary stuff 
+# from the 'GSEA analysis using GAGE and PathView' block first
+```{r}
+{
+  #reading in gage results
+  gage_results <- readRDS(file = paste0(loc_pathview_results, 
+                                        "gage_results.rds"))
+  
+  #formatting column indices for comparison in groups
+  indices <- list(grep(pattern = "Blood_Treg", 
+                       x = colnames(norm_counts_ncbi), 
+                       ignore.case = T), 
+                  grep(pattern = "(Spleen|LN|PP)_Treg", 
+                       x = colnames(norm_counts_ncbi), 
+                       ignore.case = T), 
+                  grep(pattern = "(IEL|LPL)_Treg", 
+                       x = colnames(norm_counts_ncbi), 
+                       ignore.case = T), 
+                  grep(pattern = "(Kidney|Liver|Lung|Pancreas)_Treg", 
+                       x = colnames(norm_counts_ncbi), 
+                       ignore.case = T))
+  names(indices) <- c("Blood", "Lymphoid", "Gut-associated", "Non-lymphoid")
+  
+  #calculating coreGeneSets for each gage_result
+  {
+    gage_results_coreGeneSets <- gage_results
+    
+    for(i in seq(1, length(gage_results_coreGeneSets))){
+      
+      for(j in seq(1, length(gage_results_coreGeneSets[[i]]))){
+      #for(j in seq(ifelse(i == 1, 2, 1), length(gage_results_coreGeneSets[[i]]))){
+        
+        indices_ref <- indices[[
+          grep(pattern = names(gage_results_coreGeneSets)[i], 
+               x = names(indices), 
+               ignore.case = T)[1]]]
+        
+        indices_samp <- indices[[
+          grep(pattern = names(gage_results_coreGeneSets[[i]])[j], 
+               x = names(indices), 
+               ignore.case = T)[1]]]
+        
+        print(paste0(names(gage_results_coreGeneSets)[i], " vs ", 
+                     names(gage_results_coreGeneSets[[i]])[j]))
+        
+        gage_results_coreGeneSets[[i]][[j]] <-
+          esset.grp(setp = gage_results_coreGeneSets[[i]][[j]]$greater,
+                    exprs = norm_counts_ncbi,
+                    gsets = kegg_genesets$kg.sets,
+                    ref = indices_ref,
+                    samp = indices_samp,
+                    test4up = F,
+                    same.dir = F,
+                    make.plot = T,
+                    compare = "by.group",
+                    cutoff = 0.1,
+                    use.q = T
+                    )
+        
+        # gage_results_coreGeneSets[[i]][[j]] <-
+        #   tryCatch(esset.grp(setp = gage_results_coreGeneSets[[i]][[j]]$greater,
+        #                      exprs = norm_counts_ncbi,
+        #                      gsets = kegg_genesets$kg.sets,
+        #                      ref = indices_ref,
+        #                      samp = indices_samp,
+        #                      test4up = F,
+        #                      same.dir = F,
+        #                      make.plot = T,
+        #                      compare = "by.group",
+        #                      cutoff = 0.1,
+        #                      use.q = T
+        #                      ),
+        #            error = function(e){
+        #              message(sprintf(
+        #                paste0("There are less than 1 significant gene set in %s",
+        #                       " vs %s GSEA."),
+        #                names(gage_results_coreGeneSets)[i],
+        #                names(gage_results_coreGeneSets[[i]])[j]))
+        #              return(NULL)
+        #              })
+      }
+    }
+    
+  }
+  
+  #creating and visualising the coreGeneSets as dotplot
+  {
+    #gage_results_coreGeneSets_copy <- gage_results_coreGeneSets
+    #gage_results_coreGeneSets <- gage_results_coreGeneSets_copy
+    for(i in seq(1, length(gage_results_coreGeneSets))){
+      
+      for(j in seq(1, length(gage_results_coreGeneSets[[i]]))){
+        
+        # gage_results_coreGeneSets[[i]][[j]] <- 
+        #   Reduce(f = union, 
+        #          x = gage_results_coreGeneSets[[i]][[j]]$coreGeneSets)
+        gage_results_coreGeneSets[[i]][[j]] <- 
+          Reduce(f = c, 
+                 x = gage_results_coreGeneSets[[i]][[j]]$coreGeneSets)
+      }
+    }
+    
+    gage_results_coreGeneSets <- unlist(x = gage_results_coreGeneSets, 
+                                        recursive = F)
+    
+    names(gage_results_coreGeneSets) <- gsub(pattern = "\\.{1}",
+                                             replacement = "\nvs ",
+                                             x = names(
+                                               gage_results_coreGeneSets),
+                                             ignore.case = T)
+    
+    ck <- compareCluster(geneClusters = gage_results_coreGeneSets, 
+                         fun = "enrichKEGG", 
+                         organism = "mouse", 
+                         use_internal_data = F)
+    
+    # ck <- compareCluster(geneClusters = gage_results_coreGeneSets,
+    #                      fun = "enrichGO")
+    # ck <- enrichKEGG(gene = gage_results_coreGeneSets[[1]], organism = "mouse")
+    
+    # dotplot(object = ck, showCategory = 10000, font.size = 9, split = T) + 
+    #   theme(axis.text.x=element_text(angle=90, hjust=1, vjust = 0.5))
+    # # dotplot(object = ck, showCategory = NULL, font.size = 9, split = T) + 
+    # #   theme(axis.text.x=element_text(angle=90, hjust=1, vjust = 0.5))
+    
+    plot_data <- as.data.frame(ck)
+    plot_data <- plot_data[plot_data$p.adjust<0.1,]
+    plot_data <- plot_data[order(plot_data$p.adjust, decreasing = T),]
+    
+    #only retaining pathways/gene sets not present in all contrasts to highlight
+    # differences
+    {
+      # counts_per_id <- table(plot_data$ID)
+      # plot_data <- plot_data[plot_data$ID %in% 
+      #                          names(counts_per_id[counts_per_id<6]),]
+      # plot_data <- plot_data[order(plot_data$p.adjust, decreasing = F),]
+      
+      #applying other/manual filtering
+      plot_data <- subset(plot_data, plot_data$ID %in% 
+                            c("mmu04060", "mmu04514", "mmu04668", "mmu04659", 
+                              "mmu04658", "mmu05322", "mmu04145", "mmu04115", 
+                              "mmu04064", "mmu04010", "mmu04612", "mmu04512"))
+      
+      plot_data <- plot_data[order(plot_data$Description, decreasing = T),]
+    }
+    
+    #arbitrarily picking only the first 15 KEGG ids for the plot
+    plot_data <- plot_data[plot_data$ID %in% unique(plot_data$ID)[1:15],]
+    
+    gene_ratio <- str_split(string = plot_data$GeneRatio, 
+                            pattern = "/", 
+                            simplify = T)
+    gene_ratio <- as.numeric(gene_ratio[,1]) / as.numeric(gene_ratio[,2])
+    
+    plot_data$Description <- str_wrap(plot_data$Description, width = 25)
+    
+    dotplot <- ggplot(data = plot_data, 
+                      aes(x = Cluster, 
+                          y = Description)) + 
+      geom_point(aes(colour = p.adjust, 
+                     size = gene_ratio
+                     )) + 
+      #scale_colour_gradient(low = "red", high = "blue") + 
+      scale_colour_gradientn(colors = c("red", "blue"), 
+                             breaks = c(0, 0.01, 0.02, 0.03, 0.04, 0.05), 
+                             na.value = "transparent") + 
+      scale_size(limits = c(#floor(min(gene_ratio)*10)/10,
+                            min(gene_ratio), 
+                            ceiling(max(gene_ratio)*10)/10), 
+                        breaks = seq(floor(min(gene_ratio)*10)/10, 
+                                     ceiling(max(gene_ratio)*10)/10, 
+                                     0.05)
+                        ) + 
+      # scale_y_discrete(labels = function(x) str_wrap(plot_data$Description, 
+      #                                                width = 20)) + 
+      labs(x = "Contrasts", 
+           y = "Pathways", 
+           size = "Gene Ratio", 
+           colour = "Adjusted\np.value") + 
+      theme_light(base_size = 18) + 
+      theme(axis.text.x=element_text(angle=90, hjust=1, vjust = 0.5))
+    
+    dotplot
+    
+    #trying to do a multi-layer pathview visualisation of the top x categories
+    # from the above comparison
+    {
+      
+      # foldchanges <- merged_results_list[[1]][[2]][[1]][
+      #   merged_results_list[[1]][[2]][[1]]$padj<0.1, 7, drop = F]
+      # 
+      # for(i in seq(2, length(merged_results_list[[1]][[2]]))){
+      #   foldchanges <- merge(x = foldchanges, 
+      #                        y = merged_results_list[[1]][[2]][[i]][
+      #                          merged_results_list[[1]][[2]][[i]]$padj<0.1, 7, 
+      #                          drop = F], 
+      #                        by = "row.names", 
+      #                        all = T)
+      #   rownames(foldchanges) <- foldchanges$Row.names
+      #   foldchanges$Row.names <- NULL
+      # }
+      # 
+      # foldchanges <- data.matrix(foldchanges)
+      # foldchanges[!is.finite(foldchanges)] <- NA
+      # foldchanges <- as.data.frame(foldchanges)
+      # colnames(foldchanges) <- names(merged_results_list[[1]][[2]])
+      # rownames(foldchanges) <- gsub(pattern = "\\.[0-9]+$", 
+      #                               replacement = "", 
+      #                               x = rownames(foldchanges), 
+      #                               ignore.case = T)
+      # 
+      # work.dir <- getwd()
+      # path <- paste0(loc_pathview_results, "gage_clusterProfiler/")
+      # dir.create(path = path, recursive = T)
+      # setwd(dir = path)
+      # 
+      # pathview(gene.data = foldchanges, 
+      #          cpd.data = NULL,
+      #          pathway.id = as.data.frame(ck)$ID[1:25], 
+      #          species = "mouse",
+      #          kegg.dir = new_path,
+      #          gene.idtype = "ENSEMBL",
+      #          low = list(gene = "#2a7fff", cpd = "blue"), 
+      #          mid = list(gene = "gray", cpd = "gray"), 
+      #          high = list(gene = "#ff5555", cpd = "yellow"), 
+      #          limit = list(gene = 2, cpd = 1), 
+      #          bins = list(gene = 20, cpd = 10), 
+      #          kegg.native = T)
+      # 
+      # setwd(work.dir)
+      
+    }
+    
+    
+    
+  }
+  
+}
+```
+
+
+
+#GSEA analysis file generation (for the separate GSEA software)
+```{r}
+{
+  #reading in the ouptut table to convert to gct and cls
+  {
+    
+    DESeq_object <- readRDS(file = paste0(loc_gsea, "DESeq_Object.rds"))
+    norm_counts <- as.data.frame(counts(DESeq_object, normalized = T))
+    # norm_exp_log2 <- data.matrix(log2(norm_counts))
+    # norm_exp_log2[!is.finite(norm_exp_log2)] <- NA
+    # norm_exp_log2 <- as.data.frame(norm_exp_log2)
+    
+    #formatting norm_counts column names
+    {
+      colnames(norm_counts) <- gsub(pattern = "_NT", 
+                                    replacement = "_Tconv", 
+                                    x = gsub(pattern = "_T", 
+                                             replacement = "_Treg", 
+                                             x = colnames(norm_counts), 
+                                             ignore.case = T), 
+                                    ignore.case = T)
+      
+      colnames(norm_counts) <- gsub(pattern = "IntraEpithelialLayer", 
+                                    replacement = "IEL", 
+                                    x = colnames(norm_counts), 
+                                    ignore.case = T)
+      colnames(norm_counts) <- gsub(pattern = "LaminaPropriaLymphocyte", 
+                                    replacement = "LPL", 
+                                    x = colnames(norm_counts), 
+                                    ignore.case = T)
+      colnames(norm_counts) <- gsub(pattern = "LymphNode", 
+                                    replacement = "LN", 
+                                    x = colnames(norm_counts), 
+                                    ignore.case = T)
+      colnames(norm_counts) <- gsub(pattern = "PeyersPatches", 
+                                    replacement = "PP", 
+                                    x = colnames(norm_counts), 
+                                    ignore.case = T)
+      colnames(norm_counts) <- gsub(pattern = "_", 
+                                    replacement = " ", 
+                                    x = colnames(norm_counts), 
+                                    ignore.case = T)
+    }
+    
+    
+    
+    # output_table <- read.delim(file = paste0(loc_diffexprs_merged,
+    #                                        "output_table_combined.txt"),
+    #                          sep = "\t", stringsAsFactors = F)
+    # colnames(output_table) <- output_table[3,]
+    # output_table <- output_table[-(1:3),]
+    
+    # contrast_groups <- rbind(cbind(c("Blood"), c("Blood")),
+    #                          cbind(c("Lymphoid"), c("Spleen", "LN", "PP")), 
+    #                          cbind(c("Gut-Associated"), c("IEL", "LPL")), 
+    #                          cbind(c("Non-Lymphoid"), 
+    #                                c("Kidney", "Lung", "Liver", "Pancreas"))
+    #                          )
+    contrast_groups <- rbind(cbind(c("Blood"), c("Blood")),
+                             cbind(c("Spleen_LN_PP"), 
+                                   c("Spleen", "LN", "PP")), 
+                             cbind(c("IEL_LPL"), 
+                                   c("IEL", "LPL")), 
+                             cbind(c("Kidney_Lung_Liver_Pancreas"), 
+                                   c("Kidney", "Lung", "Liver", "Pancreas"))
+                             )
+    
+  }
+  
+  #creating and exporting the .gct expression profile file for GSEA analysis and
+  # .cls phenotype class file
+  {
+    # gct_export <- (output_table[,1:43])[,-3]
+    # gct_export$`MGI symbol` <- gsub(pattern = ";.*$",
+    #                                 replacement = "",
+    #                                 x = gct_export$`MGI symbol`,
+    #                                 ignore.case = T)
+    # colnames(gct_export)[c(1,2)] <- c("NAME", "Description")
+    
+    #gct_export <- norm_counts
+    gct_export <- data.frame(NAME = gsub(pattern = "\\.[0-9]+$", 
+                                         replacement = "", 
+                                         x = rownames(norm_counts), 
+                                         ignore.case = T), 
+                             Description = "NA",
+                             norm_counts,
+                             stringsAsFactors = F)
+    colnames(gct_export) <- gsub(pattern = "\\.", 
+                                 replacement = " ", 
+                                 x = colnames(gct_export), 
+                                 ignore.case = T)
+    
+    gct_export <- rbind(c("#1.2", 
+                          vector(mode = "character", 
+                                 length = ncol(gct_export)-1)),
+                        c(nrow(gct_export), 
+                          ncol(gct_export)-2, 
+                          vector(mode = "character", 
+                                 length = ncol(gct_export)-2)),
+                        colnames(gct_export),
+                        gct_export)
+    
+    write.table(x = gct_export, 
+                file = paste0(loc_gsea, "gct_export.gct"), 
+                quote = F, 
+                sep = "\t", 
+                row.names = F, 
+                col.names = F)
+    
+    phenotype_class_export <- gsub(pattern = " [0-9]+$", 
+                                   replacement = "", 
+                                   x = colnames(gct_export)[3:ncol(gct_export)], 
+                                   ignore.case = T)
+    phenotype_class_export <- gsub(pattern = " ", 
+                                   replacement = "_", 
+                                   x = phenotype_class_export, 
+                                   ignore.case = T)
+    
+    phenotype_class_export <- 
+      paste0(contrast_groups[match(x = gsub(pattern = "_(Tconv|Treg)", 
+                                            replacement = "", 
+                                            x = phenotype_class_export, 
+                                            ignore.case = T), 
+                                   table = contrast_groups[,2]), 1], 
+             gsub(pattern = "^.*_", 
+                  replacement = "_", 
+                  x = phenotype_class_export, 
+                  ignore.case = T))
+    
+    phenotype_class_export <- rbind(c(length(phenotype_class_export), 
+                                      length(unique(phenotype_class_export)), 
+                                      1, 
+                                      vector(mode = "character", 
+                                             length = 
+                                               length(phenotype_class_export)-3
+                                             )
+                                      ),
+                                    c("#", 
+                                      unique(phenotype_class_export), 
+                                      vector(mode = "character", 
+                                             length = 
+                                               length(phenotype_class_export)-1-
+                                               length(unique(
+                                                 phenotype_class_export))
+                                             )
+                                      ),
+                                    phenotype_class_export)
+    
+    write.table(x = phenotype_class_export, 
+                file = paste0(loc_gsea, "phenotype.cls"), 
+                quote = F, 
+                sep = "\t", 
+                row.names = F, 
+                col.names = F)
+  }
+  
+  
+}
+```
+
+
+#PathView analysis on GSEA results by using KEGGREST to recover pathway ids
+```{r}
+{
+  
+  #reading in differential expression results and setting up other stuff
+  {
+    merged_results_renamed <- readRDS(file = paste0(loc_gsea, 
+                                                 "merged_results_list.rds"))
+    filtered_tcounts <- readRDS(file = paste0(loc_gsea, "filtered_tcounts.rds"))
+    
+    ensembl_ncbi <- read.delim(file = paste0(loc_gsea, "ensembl_to_ncbi.txt"), 
+                               sep = "\t", stringsAsFactors = F)
+    
+    #formatting names in merged_results_renamed
+    {
+      names(merged_results_renamed[[1]]) <- c("Treg", "Tconv")
+      
+      names(merged_results_renamed[[1]][[1]]) <-
+        names(merged_results_renamed[[1]][[2]]) <-
+        c("Blood__Vs__Spleen_LN_PP",
+          "Blood__Vs__IEL_LPL",
+          "Blood__Vs__Kidney_Lung_Liver_Pancreas",
+          "Spleen_LN_PP__Vs__IEL_LPL",
+          "Spleen_LN_PP__Vs__Kidney_Lung_Liver_Pancreas",
+          "IEL_LPL__Vs__Kidney_Lung_Liver_Pancreas")
+      # names(merged_results_renamed[[1]][[1]]) <- 
+      #   c("Blood_Tconv_versus_Lymphoid_Tconv", 
+      #     "Blood_Tconv_versus_Gut-Associated_Tconv", 
+      #     "Blood_Tconv_versus_Non-Lymphoid_Tconv", 
+      #     "Lymphoid_Tconv_versus_Gut-Associated_Tconv", 
+      #     "Lymphoid_Tconv_versus_Non-Lymphoid_Tconv", 
+      #     "Gut-Associated_Tconv_versus_Non-Lymphoid_Tconv")
+      # 
+      # names(merged_results_renamed[[1]][[2]]) <- 
+      #   c("Blood_Treg_versus_Lymphoid_Treg", 
+      #     "Blood_Treg_versus_Gut-Associated_Treg", 
+      #     "Blood_Treg_versus_Non-Lymphoid_Treg", 
+      #     "Lymphoid_Treg_versus_Gut-Associated_Treg", 
+      #     "Lymphoid_Treg_versus_Non-Lymphoid_Treg", 
+      #     "Gut-Associated_Treg_versus_Non-Lymphoid_Treg")
+    }
+  }
+  
+  #saving the work directory since PathView outputs the coloured plots to 
+  # current work directory instead of the supplied kegg.dir
+  loc_workdir <- getwd()
+  
+  gsea_to_pathview <- list()
+  
+  data(gene.idtype.bods)
+  for(path_level1 in list.dirs(path = loc_gsea_results, 
+                               full.names = F, 
+                               recursive = F)){
+    
+    #print(path_level1)
+    for(path_level2 in list.dirs(path = paste0(loc_gsea_results, 
+                                               path_level1, 
+                                               "/"), 
+                                 full.names = F, 
+                                 recursive = F)){
+      
+      #print(path_level2)
+      # files <- unlist(str_extract_all(string = list.files(
+      #   paste0(loc_gsea_results, 
+      #          path_level1, "/", 
+      #          path_level2, "/"), 
+      #   full.names = T), 
+      #   pattern = "gsea_report_for.*\\.xls")
+      #   )
+      files <- unlist(str_extract_all(string = list.files(
+        paste0(loc_gsea_results, 
+               path_level1, "/", 
+               path_level2, "/"), 
+        full.names = T), 
+        pattern = "gsea_report_for.*\\.tsv")
+        )
+      #print(files)
+      
+      for(file in files){
+        
+        print(file)
+        pathways_table <- read.delim(file = paste0(loc_gsea_results, 
+                                                   path_level1, "/", 
+                                                   path_level2, "/", 
+                                                   file), 
+                                     sep = "\t", 
+                                     stringsAsFactors = F)
+        
+        pathways_table <- pathways_table[grepl(pattern = "KEGG", 
+                                               x = pathways_table$NAME, 
+                                               ignore.case = T),]
+        
+        pathways_table <- subset(pathways_table, 
+                                 pathways_table$FDR.q.val <= 0.25)
+        print(dim(pathways_table))
+        #skip rest if no KEGG pathways found
+        if(!nrow(pathways_table)>0) next
+        
+        #using adist to find complete pathway name match if multiple pathways 
+        # are returned
+        #adist(x = "RIBOSOME and bleh", y = keggFind(database = "pathway", query = "RIBOSOME"), ignore.case = T)
+        
+        # pathway_ids <- unlist(foreach(i = 1:nrow(pathways_table), 
+        #                               .packages="foreach") %do% {
+        #   pathway_name <- pathways_table$NAME[i]
+        #   pathway_name <- gsub(pattern = "_", 
+        #                        replacement = " ", 
+        #                        x = gsub(pattern = "^KEGG_", 
+        #                                 replacement = "", 
+        #                                 x = pathway_name, 
+        #                                 ignore.case = T), 
+        #                        ignore.case = T)
+        #   #print(pathway_name)
+        #   if(length(pathway_name)>0){
+        #     pathway_hits <- adist(x = pathway_name, 
+        #                           y = keggFind(database = "pathway", 
+        #                                        query = pathway_name), 
+        #                           ignore.case = T)
+        #     #print(pathway_hits)
+        #     if(length(pathway_hits)>0){
+        #       #colnames(pathway_hits) <- 
+        #       gsub(pattern = "^path:map", 
+        #            replacement = "", 
+        #            x = colnames(pathway_hits)[
+        #              pathway_hits == min(pathway_hits)], 
+        #            ignore.case = T)
+        #     }
+        #     else NULL
+        #     }
+        #   })
+        
+        pathway_ids <- NULL
+        row_ids <- as.character(rownames(pathways_table))
+        for(i in seq(1, nrow(pathways_table))){
+          
+          pathway_name <- pathways_table$NAME[i]
+          pathway_name <- gsub(pattern = "_",
+                               replacement = " ",
+                               x = gsub(pattern = "^KEGG_",
+                                        replacement = "",
+                                        x = pathway_name,
+                                        ignore.case = T),
+                               ignore.case = T)
+          #print(pathway_name)
+          if(length(pathway_name)>0){
+            pathway_hits <- adist(x = pathway_name,
+                                  y = keggFind(database = "pathway",
+                                               query = pathway_name),
+                                  ignore.case = T)
+            #print(pathway_hits)
+            if(length(pathway_hits)>0){
+              #colnames(pathway_hits) <-
+              row_ids[i] <- gsub(pattern = "^path:map",
+                                 replacement = "",
+                                 x = colnames(pathway_hits)[
+                                   pathway_hits == min(pathway_hits)],
+                                 ignore.case = T)
+              pathway_ids <- append(pathway_ids, row_ids[i])
+            }
+            #else NULL
+            }
+        }
+        
+        rownames(pathways_table) <- row_ids
+        
+        #print(pathway_ids)
+        
+        #extracting and formatting gene.data for pathview()
+        {
+          tag <- gsub(pattern = "\\..*$", 
+                      replacement = "", 
+                      x = path_level2, 
+                      ignore.case = T)
+          tag <- gsub(pattern = "_(Treg|Tconv)", 
+                      replacement = "", 
+                      x = tag, 
+                      ignore.case = T)
+          tag <- gsub(pattern = "_versus_", 
+                      replacement = "__Vs__", 
+                      x = tag, 
+                      ignore.case = T)
+          
+          if(grepl(pattern = "Tconv", x = path_level2, ignore.case = T)){
+            gene.data <- as.data.frame(merged_results_renamed[[1]][[2]][[
+              match(x = tag, table = names(merged_results_renamed[[1]][[1]]))]])
+          }
+          else{
+            gene.data <- as.data.frame(merged_results_renamed[[1]][[1]][[
+              match(x = tag, table = names(merged_results_renamed[[1]][[1]]))]])
+          }
+          
+          #volcano plot constraints
+          # gene.data <- gene.data[is.finite(gene.data$ActualLog2FC),]
+          # gene.data <- subset(gene.data, rownames(gene.data) %in%
+          #                       rownames(filtered_tcounts) &
+          #                       gene.data$padj < 0.01)
+          
+          gene.data <- as.matrix(gene.data[,2, drop = F])
+          rownames(gene.data) <- gsub(pattern = "\\.[0-9]+$", 
+                                      replacement = "", 
+                                      x = rownames(gene.data), 
+                                      ignore.case = T)
+          # gene_ids <- rownames(gene.data)
+          # gene.data <- gene.data[,1]
+          # names(gene.data) <- gene_ids
+          # rm(gene_ids)
+        }
+        
+        new_path <- paste0(loc_gsea, "PathView Results/GSEA_to_PathView/", 
+                           path_level1, "/", 
+                           gsub(pattern = "\\..*$", 
+                                replacement = "", 
+                                x = path_level2, 
+                                ignore.case = T), 
+                           "/")
+        dir.create(path = new_path, recursive = T)
+        
+        #set new path as work directory for coloured pathways to be exported 
+        # there
+        setwd(new_path)
+        
+        pathview(gene.data = gene.data, 
+                 cpd.data = NULL,
+                 pathway.id = pathway_ids, 
+                 species = "mouse",
+                 kegg.dir = new_path,
+                 gene.idtype = "ENSEMBL",
+                 low = list(gene = "#2a7fff", cpd = "blue"), 
+                 mid = list(gene = "gray", cpd = "gray"), 
+                 high = list(gene = "#ff5555", cpd = "yellow"), 
+                 limit = list(gene = 2, cpd = 1), 
+                 bins = list(gene = 20, cpd = 10), 
+                 kegg.native = T)
+        
+        write.table(x = pathways_table, 
+                    file = paste0(new_path, file, ".tab"), 
+                    quote = F, 
+                    sep = "\t")
+        
+        if(paste0(path_level1, "_", tag) %in% names(gsea_to_pathview)){
+          
+          index <- which(names(gsea_to_pathview) %in% 
+                           paste0(path_level1, "_", tag))
+          
+          gsea_to_pathview[[index]][[length(gsea_to_pathview[[index]])+1]] <- 
+            pathways_table
+          
+          names(gsea_to_pathview[[index]])[length(gsea_to_pathview[[index]])] <- 
+            file
+        }
+        else{
+          gsea_to_pathview[[length(gsea_to_pathview)+1]] <- list()
+          gsea_to_pathview[[length(gsea_to_pathview)]][[
+            length(gsea_to_pathview[[length(gsea_to_pathview)]])+1]] <- 
+            pathways_table
+          
+          names(gsea_to_pathview)[length(gsea_to_pathview)] <- 
+            paste0(path_level1, "_", tag)
+          names(gsea_to_pathview[[length(gsea_to_pathview)]])[
+            length(gsea_to_pathview[[length(gsea_to_pathview)]])] <- file
+        }
+        
+        #restore work directory
+        setwd(loc_workdir)
+        
+        # pathview(gene.data = gene.data, 
+        #          cpd.data = NULL,
+        #          pathway.id = pathway_ids, 
+        #          species = "mouse",
+        #          kegg.dir = new_path,
+        #          gene.idtype = "ENSEMBL",
+        #          kegg.native = T)
+        
+        #pathway_ids <- NULL
+        
+        
+        }
+      }
+  }
+  
+  # keggFind(database = "pathway", query = "RIBOSOME")
+  # keggFind(database = "pathway", query = "ENDOMETRIAL CANCER")
+  # #         path:map05213 
+  # # "Endometrial cancer" 
+  # 
+  # pathview(gene.data = c(1), pathway.id = "05213")
+  
+  
+}
+```
+
+
+#Comparing gage and gsea results
+```{r}
+{
+  #doing a quick manual check
+  {
+    Blood_v_Gut <- union(intersect(
+      rownames(gsea_to_pathview[[7]][[1]])[
+        str_length(string = rownames(gsea_to_pathview[[6]][[1]]))>3], 
+      str_extract_all(string = rownames(gage_results[[1]][[1]][[1]][
+        #gage_results[[1]][[2]][[1]][,6]<=0.25,]), 
+        gage_results[[1]][[2]][[1]][,6]<=0.1,]), 
+        pattern = "[0-9]+", 
+        simplify = T)[,1]
+      ),
+      intersect(
+      rownames(gsea_to_pathview[[7]][[2]])[
+        str_length(string = rownames(gsea_to_pathview[[6]][[1]]))>3], 
+      str_extract_all(string = rownames(gage_results[[1]][[1]][[1]][
+        #gage_results[[1]][[2]][[1]][,6]<=0.25,]), 
+        gage_results[[1]][[2]][[1]][,6]<=0.1,]), 
+        pattern = "[0-9]+", 
+        simplify = T)[,1]
+      ))
+    
+    Blood_v_Lymphoid <- union(intersect(
+      rownames(gsea_to_pathview[[9]][[1]])[
+        str_length(string = rownames(gsea_to_pathview[[6]][[1]]))>3], 
+      str_extract_all(string = rownames(gage_results[[1]][[1]][[1]][
+        #gage_results[[1]][[1]][[1]][,6]<=0.25,]), 
+        gage_results[[1]][[1]][[1]][,6]<=0.1,]), 
+        pattern = "[0-9]+", 
+        simplify = T)[,1]
+      ),
+      intersect(
+      rownames(gsea_to_pathview[[9]][[2]])[
+        str_length(string = rownames(gsea_to_pathview[[6]][[1]]))>3], 
+      str_extract_all(string = rownames(gage_results[[1]][[1]][[1]][
+        #gage_results[[1]][[1]][[1]][,6]<=0.25,]), 
+        gage_results[[1]][[1]][[1]][,6]<=0.1,]), 
+        pattern = "[0-9]+", 
+        simplify = T)[,1]
+      ))
+    
+    Blood_v_Nonlymphoid <- union(intersect(
+      rownames(gsea_to_pathview[[8]][[1]])[
+        str_length(string = rownames(gsea_to_pathview[[6]][[1]]))>3], 
+      str_extract_all(string = rownames(gage_results[[1]][[1]][[1]][
+        #gage_results[[1]][[3]][[1]][,6]<=0.25,]), 
+        gage_results[[1]][[3]][[1]][,6]<=0.1,]), 
+        pattern = "[0-9]+", 
+        simplify = T)[,1]
+      ),
+      intersect(
+      rownames(gsea_to_pathview[[8]][[2]])[
+        str_length(string = rownames(gsea_to_pathview[[6]][[1]]))>3], 
+      str_extract_all(string = rownames(gage_results[[1]][[1]][[1]][
+        #gage_results[[1]][[3]][[1]][,6]<=0.25,]), 
+        gage_results[[1]][[3]][[1]][,6]<=0.1,]), 
+        pattern = "[0-9]+", 
+        simplify = T)[,1]
+      ))
+    
+    Gut_v_Nonlymphoid <- #union(
+      intersect(
+      rownames(gsea_to_pathview[[10]][[1]])[
+        str_length(string = rownames(gsea_to_pathview[[6]][[1]]))>3], 
+      str_extract_all(string = rownames(gage_results[[1]][[1]][[1]][
+        #gage_results[[3]][[1]][[1]][,6]<=0.25,]), 
+        gage_results[[3]][[1]][[1]][,6]<=0.1,]), 
+        pattern = "[0-9]+", 
+        simplify = T)[,1]
+      )#,
+      # intersect(
+      # rownames(gsea_to_pathview[[10]][[2]])[
+      #   str_length(string = rownames(gsea_to_pathview[[6]][[1]]))>3], 
+      # str_extract_all(string = rownames(gage_results[[1]][[1]][[1]][
+      #   gage_results[[3]][[1]][[1]][,6]<=0.25,]), 
+      #   pattern = "[0-9]+", 
+      #   simplify = T)[,1]
+      # ))
+    
+    Lymphoid_v_Gut <- union(intersect(
+      rownames(gsea_to_pathview[[11]][[1]])[
+        str_length(string = rownames(gsea_to_pathview[[6]][[1]]))>3], 
+      str_extract_all(string = rownames(gage_results[[1]][[1]][[1]][
+        #gage_results[[2]][[1]][[1]][,6]<=0.25,]), 
+        gage_results[[2]][[1]][[1]][,6]<=0.1,]), 
+        pattern = "[0-9]+", 
+        simplify = T)[,1]
+      ),
+      intersect(
+      rownames(gsea_to_pathview[[11]][[2]])[
+        str_length(string = rownames(gsea_to_pathview[[6]][[1]]))>3], 
+      str_extract_all(string = rownames(gage_results[[1]][[1]][[1]][
+        #gage_results[[2]][[1]][[1]][,6]<=0.25,]), 
+        gage_results[[2]][[1]][[1]][,6]<=0.1,]), 
+        pattern = "[0-9]+", 
+        simplify = T)[,1]
+      ))
+    
+    Lymphoid_v_Nonlymphoid <- union(intersect(
+      rownames(gsea_to_pathview[[12]][[1]])[
+        str_length(string = rownames(gsea_to_pathview[[6]][[1]]))>3], 
+      str_extract_all(string = rownames(gage_results[[1]][[1]][[1]][
+        #gage_results[[2]][[2]][[1]][,6]<=0.25,]), 
+        gage_results[[2]][[2]][[1]][,6]<=0.1,]), 
+        pattern = "[0-9]+", 
+        simplify = T)[,1]
+      ),
+      intersect(
+      rownames(gsea_to_pathview[[12]][[2]])[
+        str_length(string = rownames(gsea_to_pathview[[6]][[1]]))>3], 
+      str_extract_all(string = rownames(gage_results[[1]][[1]][[1]][
+        #gage_results[[2]][[2]][[1]][,6]<=0.25,]), 
+        gage_results[[2]][[2]][[1]][,6]<=0.1,]), 
+        pattern = "[0-9]+", 
+        simplify = T)[,1]
+      ))
+  }
+  
+  #compareCluster from clusterProfiler
+  ck <- compareCluster(geneCluster = list(Blood_v_Gut, 
+                                          Blood_v_Lymphoid, 
+                                          Blood_v_Nonlymphoid, 
+                                          Gut_v_Nonlymphoid, 
+                                          Lymphoid_v_Gut, 
+                                          Lymphoid_v_Nonlymphoid), 
+                       fun = "enrichKEGG")
+  
+  #requires entrez/ncbi ids
+  #dotplot(ck)
+  
+  #barplot
+  barplot(list(Blood_v_Gut, 
+               Blood_v_Lymphoid, 
+               Blood_v_Nonlymphoid, 
+               Gut_v_Nonlymphoid, 
+               Lymphoid_v_Gut, 
+               Lymphoid_v_Nonlymphoid), 
+          showCategory = 20)
+  
+  
+  temp <- keggGet("mmu03010")
+  head(temp[[1]]$GENE, 50)
+  
+  which(id_mapping$ENTREZID %in% temp[[1]]$GENE[seq(1,10,2)])
+  
+  
+  temp <- esset.grp(setp = gage_results[[1]][[1]]$greater, exprs = norm_counts_ncbi, gsets = kegg_genesets$kg.sets, ref = indices[[1]], samp = indices[[2]], test4up = F, same.dir = F, make.plot = T, compare = "by.group")
+  
+}
+```
+
+#gsea analysis using fgsea
+```{r}
+
+#reading in DESeq2 and other outputs
+{
+  
+  #reading the DESeq2 analysis output table
+  merged_results_list <- readRDS(file = paste0(loc_diffexprs, 
+                                        "merged_results_list.rds"))
+  
+  filtered_genes <- read.delim(file = paste0(loc_gsea, 
+                                            "filtered_0.01_12868.txt"), 
+                              header = T, 
+                              sep = "\t", 
+                              stringsAsFactors = F)
+  
+  restruct_MGI_info <- read.delim(file = paste0(loc_diffexprs_merged, 
+                                      "combined_MGI_info.txt"), 
+                        header = T, 
+                        sep = "\t", 
+                        stringsAsFactors = F)
+  
+}
+
+## uncomment code in here to retreive information from biomart and write it 
+#   out
+{
+  # #retreiving info from biomart
+  # {
+  #   ensembl <- useMart(biomart = "ensembl", dataset = "mmusculus_gene_ensembl")
+  #   filters <- listFilters(ensembl) #ensembl_gene_id
+  #   attributes <- listAttributes(ensembl) #mgi_symbol, external_synonym and
+  #   #mgi_description
+  #   NCBI_info <- getBM(attributes = c('ensembl_gene_id', 'entrezgene_id'), 
+  #                      filters = 'ensembl_gene_id', 
+  #                      values = filtered_genes$Gene.stable.ID, 
+  #                      mart = ensembl)
+  # 
+  #   NCBI_info <- NCBI_info[order(NCBI_info$ensembl_gene_id),]
+  #   
+  #   write.table(x = NCBI_info, 
+  #               file = paste0(loc_gsea, "ensembl_to_ncbi.txt"), 
+  #               sep = "\t", 
+  #               quote = F, 
+  #               row.names = F, 
+  #               col.names = T)
+  # }
+
+}
+
+
+#exporting ranked genelists using MGI to be used in GSEA gui
+{
+  
+  # gsea_gene_lists <- merged_results_list
+  # path <- loc_gsea
+  # 
+  # #dir.create(path = path, recursive = T)
+  # 
+  # for(i in seq(1, length(merged_results_list))){
+  #   
+  #   
+  #   for(j in seq(1, length(merged_results_list[[i]]))){
+  #     
+  #     if(j == 1){
+  #       path <- paste0(loc_gsea, "Treg lists")
+  #       dir.create(path = path)
+  #     } 
+  #     else{
+  #       path <- paste0(loc_gsea, "Tconv lists")
+  #       dir.create(path = path)
+  #     }
+  #     
+  #     for(k in seq(1, length(merged_results_list[[i]][[j]]))){
+  #       
+  #       #if using NCBI ids
+  #       {
+  #         # gene_list_ranked <- subset(merged_results_list[[i]][[j]][[k]], 
+  #         #                            NCBI_info$ensembl_gene_id %in% 
+  #         #                              gsub(pattern = "\\.[0-9]+$", 
+  #         #                                   replacement = "", 
+  #         #                                   x = rownames(
+  #         #                                     merged_results_list[[i]][[j]][[k]]), 
+  #         #                                   ignore.case = T)
+  #         #                            )
+  #         # 
+  #         # gene_list_ranked$ensembl_gene_id <- gsub(pattern = "\\.[0-9]+$", 
+  #         #                                          replacement = "", 
+  #         #                                          x = rownames(gene_list_ranked), 
+  #         #                                          ignore.case = T)
+  #         # 
+  #         # gene_list_ranked <- merge(x = gene_list_ranked, 
+  #         #                           y = NCBI_info, 
+  #         #                           by = "ensembl_gene_id", 
+  #         #                           all = F)
+  #         # 
+  #         # gsea_gene_lists[[i]][[j]][[k]] <- data.frame(
+  #         #   NCBI_ID = gene_list_ranked$entrezgene_id, 
+  #         #   Rank = rank(x = gene_list_ranked$padj, na.last = NA)
+  #         #   )
+  #       }
+  #       
+  #       #using ensembl
+  #       gene_list_ranked <- merged_results_list[[i]][[j]][[k]]
+  #       gene_list_ranked$ensembl_gene_id <- gsub(pattern = "\\.[0-9]+$",
+  #                                                replacement = "",
+  #                                                x = rownames(gene_list_ranked),
+  #                                                ignore.case = T)
+  #       
+  #       gene_list_ranked <- gene_list_ranked[
+  #         is.finite(gene_list_ranked$ActualLog2FC),]
+  #       
+  #       gene_list_ranked <- merge(x = gene_list_ranked, 
+  #                                 y = restruct_MGI_info[,c(1,3)], 
+  #                                 by = "ensembl_gene_id", 
+  #                                 all.x = T, 
+  #                                 all.y = F)
+  #       
+  #       gene_list_ranked <- gene_list_ranked[order(gene_list_ranked$padj, 
+  #                                                  decreasing = F),]
+  #       
+  #       gene_list_ranked$MGI.symbol <- gsub(pattern = ";.*$", 
+  #                                           replacement = "", 
+  #                                           x = gene_list_ranked$MGI.symbol, 
+  #                                           ignore.case = T)
+  #       
+  #       gene_list_ranked <- gene_list_ranked[
+  #         !(gene_list_ranked$MGI.symbol == ""),]
+  #       
+  #       #rank(-x) produces descending ranking that is used in GSEA (high is top)
+  #       gsea_gene_lists[[i]][[j]][[k]] <- data.frame(
+  #         Symbol = gene_list_ranked$MGI.symbol,
+  #         Rank = seq(length(gene_list_ranked$MGI.symbol), 1, -1)
+  #         )
+  #       
+  #       # gsea_gene_lists[[i]][[j]][[k]] <- gsea_gene_lists[[i]][[j]][[k]][
+  #       #   order(gsea_gene_lists[[i]][[j]][[k]]$Rank, decreasing = T), ]
+  #       
+  #       write.table(x = gsea_gene_lists[[i]][[j]][[k]], 
+  #                   file = paste0(path, "/", 
+  #                                 names(merged_results_list[[i]][[j]])[k], 
+  #                                 ".rnk"), 
+  #                   quote = F, 
+  #                   sep = "\t", 
+  #                   col.names = T, 
+  #                   row.names = F)
+  #       
+  #     }
+  #   }
+  # }
+  
+}
+
+# 
+# #setting up parameters for fGSEA
+# # selected_GMT <- fgsea::gmtPathways(gmt.file = paste0(loc_gsea_gmt, 
+# #                                                      "mGSKB_Ensembl.gmt"))
+# selected_GMT <- fgsea::gmtPathways(gmt.file = paste0(loc_gsea_gmt, 
+#                                                      "MousePath_Pathway_gmt.gmt"))
+# # NCBI_info <- read.delim(file = paste0(loc_gsea, "ensembl_to_ncbi.txt"), 
+# #                         header = T, 
+# #                         sep = "\t", 
+# #                         stringsAsFactors = F)
+# gsea_results <- merged_results_list
+# 
+# #performing fgsea
+# for(i in seq(1, length(merged_results_list))){
+#   
+#   for(j in seq(1, length(merged_results_list[[i]]))){
+#     
+#     for(k in seq(1, length(merged_results_list[[i]][[j]]))){
+#       
+#       #gene_list <- rank(merged_results_list[[i]][[j]][[k]]$padj)
+#       gene_list <- merged_results_list[[i]][[j]][[k]]$padj
+#       names(gene_list) <- gsub(pattern = "\\.[0-9]+$", 
+#                                replacement = "", 
+#                                x = rownames(merged_results_list[[i]][[j]][[k]]), 
+#                                ignore.case = T)
+#       gene_list <- gene_list[names(gene_list) %in% 
+#                                filtered_genes$Gene.stable.ID]
+#       
+#       gene_list <- rank(gene_list)
+#       gene_list <- sort(x = gene_list, decreasing = F)
+#       
+#       gsea_results[[i]][[j]][[k]] <- as.data.frame(
+#         fgsea(pathways = selected_GMT, 
+#               stats = gene_list, 
+#               nperm = 10000, 
+#               minSize = 3, 
+#               maxSize = Inf, 
+#               nproc = ceiling(numCores*(3/4)) 
+#               #BPPARAM = T
+#               )
+#         )
+#       
+#       gsea_results[[i]][[j]][[k]] <- subset(gsea_results[[i]][[j]][[k]], 
+#                                             gsea_results[[i]][[j]][[k]]$pval < 
+#                                               0.05)
+#       
+#     }
+#       
+#   }
+#   
+# }
+# rm(i,j,k)
+
+```
+
+
